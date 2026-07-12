@@ -16,7 +16,9 @@ import (
 // redirect, a fallback route, middleware priority, middleware groups,
 // parameterized middleware ("role:editor,admin"), excluding a group's
 // middleware on one route (WithoutMiddleware), a middleware resolved
-// straight from the service container, and CSRF protection.
+// straight from the service container, CSRF protection, request-inspection
+// helpers, the unified input payload, encrypted cookies, flash/old input,
+// and file uploads.
 func MapWebRoutes(kernel *apphttp.Kernel) {
 	userController := controllers.NewUserController()
 
@@ -151,6 +153,104 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	// list ("/stripe/*") rather than by omitting the "csrf" middleware —
 	// the same middleware runs, it just lets this path through.
 	kernel.POST("/stripe/webhook", resourceHandler("stripe.webhook")).Middleware("csrf").Name("stripe.webhook")
+
+	// --- Request inspection helpers: Path/Is/Url/FullUrl/Method/IsMethod/
+	// Ip/BearerToken/ExpectsJson. Ip() only ever reads Request.RemoteAddr
+	// (see its doc comment) — it reflects TrustProxies' resolved client
+	// address whenever the immediate peer is a trusted proxy. ---
+	kernel.GET("/request-info", func(c *apphttp.Context) {
+		c.JSON(http.StatusOK, map[string]any{
+			"path":         c.Path(),
+			"url":          c.Url(),
+			"full_url":     c.FullUrl(),
+			"method":       c.Method(),
+			"is_get":       c.IsMethod("GET"),
+			"is_admin":     c.Is("admin/*"),
+			"ip":           c.Ip(),
+			"bearer_token": c.BearerToken(),
+			"expects_json": c.ExpectsJson(),
+		})
+	}).Name("request.info")
+
+	// --- Unified input: All/Input (with a default)/Has/Only/Except/
+	// Boolean, merging query parameters, a JSON body, and form fields
+	// (whichever the request actually sent) into one payload. ---
+	kernel.POST("/profile", func(c *apphttp.Context) {
+		if !c.Has("name", "email") {
+			c.JSON(http.StatusUnprocessableEntity, map[string]string{"error": "name and email are required"})
+			return
+		}
+		c.JSON(http.StatusOK, map[string]any{
+			"all":        c.All(),
+			"only":       c.Only("name", "email"),
+			"except":     c.Except("email"),
+			"nickname":   c.Input("nickname", "anonymous"),
+			"newsletter": c.Boolean("newsletter"),
+		})
+	}).Name("profile.update")
+
+	// --- Encrypted, authenticated cookies: SetCookie/Cookie. ---
+	kernel.GET("/cookie/set", func(c *apphttp.Context) {
+		if err := c.SetCookie("preferred_theme", "dark", 3600); err != nil {
+			c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to set cookie"})
+			return
+		}
+		c.JSON(http.StatusOK, map[string]string{"status": "cookie set"})
+	}).Name("cookie.set")
+
+	kernel.GET("/cookie/read", func(c *apphttp.Context) {
+		value, err := c.Cookie("preferred_theme")
+		if err != nil {
+			c.JSON(http.StatusOK, map[string]string{"preferred_theme": ""})
+			return
+		}
+		c.JSON(http.StatusOK, map[string]string{"preferred_theme": value})
+	}).Name("cookie.read")
+
+	// --- Flash + Old input, paired with CSRF (the realistic Laravel
+	// pattern: a failed submission flashes the input and redirects back to
+	// the form, which repopulates itself from Old and still carries a
+	// valid CSRF token since both live in the same session). ---
+	kernel.GET("/contact", func(c *apphttp.Context) {
+		c.JSON(http.StatusOK, map[string]string{
+			"old_email":  c.Old("email"),
+			"csrf_token": c.CsrfToken(),
+		})
+	}).Middleware("csrf").Name("contact.form")
+
+	kernel.POST("/contact", func(c *apphttp.Context) {
+		if !c.Has("email") {
+			c.Flash()
+			c.Redirect(http.StatusFound, "/contact")
+			return
+		}
+		c.JSON(http.StatusOK, map[string]string{"status": "submitted"})
+	}).Middleware("csrf").Name("contact.submit")
+
+	// --- File uploads: HasFile/File, then Store with an automatically
+	// generated, collision-resistant filename. ---
+	kernel.POST("/avatar", func(c *apphttp.Context) {
+		if !c.HasFile("avatar") {
+			c.JSON(http.StatusUnprocessableEntity, map[string]string{"error": "avatar file is required"})
+			return
+		}
+		file, err := c.File("avatar")
+		if err != nil || !file.IsValid() {
+			c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid upload"})
+			return
+		}
+		path, err := file.Store("storage/avatars")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to store file"})
+			return
+		}
+		c.JSON(http.StatusOK, map[string]any{
+			"original_name": file.Filename,
+			"size":          file.Size,
+			"extension":     file.Extension(),
+			"stored_at":     path,
+		})
+	}).Name("avatar.upload")
 
 	// --- Redirect shortcut: Route::redirect($from, $to, $status) ---
 	kernel.Redirect("/home", "/user", http.StatusFound)

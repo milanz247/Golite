@@ -17,6 +17,18 @@ const SessionCookieName = "golite_session"
 // Session's value store.
 const csrfTokenKey = "_csrf_token"
 
+// flashOldPrefix/flashNewPrefix implement Laravel's two-bucket flash data
+// rotation: Context.Flash() writes under flashNewPrefix (visible starting
+// the *next* request); Session.ageFlashData, called once per request from
+// Context.Session, promotes flashNewPrefix keys to flashOldPrefix (visible
+// *this* request, via Context.Old) and discards whatever was in
+// flashOldPrefix before that — so flashed data survives for exactly one
+// request cycle, matching Laravel's old()/flash() semantics.
+const (
+	flashOldPrefix = "_flash_old."
+	flashNewPrefix = "_flash_new."
+)
+
 // Session is a per-browser, server-side key/value store, analogous to
 // Laravel's Illuminate\Session\Store. A Session is created lazily, the
 // first time a request calls Context.Session, and lives in a SessionStore
@@ -72,6 +84,50 @@ func (s *Session) Token() string {
 	}
 	s.values[csrfTokenKey] = generated
 	return generated
+}
+
+// flashPut stores value under key in the "new" flash bucket, so it becomes
+// readable via flashGet starting with the *next* request that resolves
+// this session (see ageFlashData).
+func (s *Session) flashPut(key, value string) {
+	s.Put(flashNewPrefix+key, value)
+}
+
+// flashGet reads a value from the "old" flash bucket — data flashed on the
+// *previous* request.
+func (s *Session) flashGet(key string) string {
+	return s.Get(flashOldPrefix + key)
+}
+
+// ageFlashData rotates the flash buckets: whatever was previously promoted
+// to flashOldPrefix (readable via Old() during the request that's now
+// ending) is discarded, and whatever was flashed *during that request*
+// (flashNewPrefix) is promoted to flashOldPrefix, becoming readable via
+// Old() for the request now starting. Called exactly once per request —
+// at the top, from Context.Session, before that request's own Flash (if
+// any) runs — so data flashed on request N becomes readable via Old() on
+// request N+1 only, never immediately on N itself.
+func (s *Session) ageFlashData() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for k := range s.values {
+		if strings.HasPrefix(k, flashOldPrefix) {
+			delete(s.values, k)
+		}
+	}
+
+	var newKeys []string
+	for k := range s.values {
+		if strings.HasPrefix(k, flashNewPrefix) {
+			newKeys = append(newKeys, k)
+		}
+	}
+	for _, k := range newKeys {
+		oldKey := flashOldPrefix + strings.TrimPrefix(k, flashNewPrefix)
+		s.values[oldKey] = s.values[k]
+		delete(s.values, k)
+	}
 }
 
 // generateSecureToken returns a URL-safe, base64-encoded random token

@@ -625,6 +625,19 @@ type Kernel struct {
 
 	sessions *SessionStore
 
+	// appKey encrypts/authenticates cookies set via Context.SetCookie and
+	// read via Context.Cookie (AES-256-GCM). It's generated fresh with
+	// crypto/rand every time NewKernel runs, rather than loaded from
+	// config, for the same reason Golite's SessionStore is in-memory only
+	// (see Session.go): this is a lightweight, single-process framework
+	// with no persistence story yet, so a key that doesn't survive a
+	// restart is an honest reflection of that, not a workaround. A
+	// deployment needing encrypted cookies to survive restarts (or to be
+	// shared across instances) would load this from a persistent secret
+	// instead — see docs/security-csrf.md for the equivalent tradeoff
+	// already documented for sessions.
+	appKey []byte
+
 	routes      []*RouteDefinition
 	namedRoutes map[string]*RouteDefinition
 	fallback    *RouteDefinition
@@ -638,6 +651,10 @@ type Kernel struct {
 // kernel.AliasMiddleware("csrf", middleware.NewVerifyCsrfToken(...)) in
 // routes/web.go; Kernel.go itself can't reference that concrete type
 // without an import cycle (app/Http/Middleware already imports app/Http).
+// The same constraint means Kernel.go can't pre-register the
+// normalization/trust middleware (TrimStrings, ConvertEmptyStringsToNull,
+// TrustProxies, TrustHosts) into GlobalMiddleware either — they're wired
+// up in public/main.go instead, which already imports both packages.
 func NewKernel(c *container.Container) *Kernel {
 	k := &Kernel{
 		container:       c,
@@ -647,6 +664,7 @@ func NewKernel(c *container.Container) *Kernel {
 		},
 		namedRoutes: make(map[string]*RouteDefinition),
 		sessions:    NewSessionStore(),
+		appKey:      generateAppKey(),
 	}
 	setDefaultKernel(k)
 	return k
@@ -1050,10 +1068,11 @@ func (k *Kernel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	chain = append(chain, k.dispatch)
 
-	ctx := newContext(w, r, k.container, k.sessions, chain)
+	ctx := newContext(w, r, k.container, k.sessions, k.appKey, chain)
 	ctx.Next()
 
 	k.terminate(ctx)
+	ctx.cleanupTempFiles()
 }
 
 // ---------------------------------------------------------------------------

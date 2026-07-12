@@ -19,7 +19,22 @@ func main() {
 	app.Register(&providers.AppServiceProvider{})
 	app.Register(&providers.RouteServiceProvider{})
 
-	app.Kernel.UseMiddleware(appMiddleware.MethodSpoofing(), appMiddleware.Logger())
+	// Order matters: host/proxy trust must be resolved before anything
+	// reads the client's address or builds a URL from the Host header;
+	// method spoofing must run before routing; input normalization
+	// (Trim, then ConvertEmptyStringsToNull) should happen before any
+	// handler reads input; Logger runs last so it captures the whole
+	// request. TrustHosts is left with no patterns (i.e. disabled) here,
+	// since this demo has no fixed production domain — pass real domains
+	// in a production deployment.
+	app.Kernel.UseMiddleware(
+		appMiddleware.NewTrustHosts(),
+		appMiddleware.NewTrustProxies("127.0.0.1", "::1"),
+		appMiddleware.MethodSpoofing(),
+		appMiddleware.TrimStrings(),
+		appMiddleware.ConvertEmptyStringsToNull(),
+		appMiddleware.Logger(),
+	)
 
 	app.Boot()
 
