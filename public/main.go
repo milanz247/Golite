@@ -19,7 +19,7 @@ func main() {
 	app.Register(&providers.AppServiceProvider{})
 	app.Register(&providers.RouteServiceProvider{})
 
-	app.Kernel.UseMiddleware(appMiddleware.Logger())
+	app.Kernel.UseMiddleware(appMiddleware.MethodSpoofing(), appMiddleware.Logger())
 
 	app.Boot()
 
