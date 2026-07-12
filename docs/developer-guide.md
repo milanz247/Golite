@@ -7,7 +7,8 @@ conceptual background behind each of these, see:
 [service-container.md](service-container.md),
 [service-providers.md](service-providers.md), [routing.md](routing.md),
 [middleware.md](middleware.md), [security-csrf.md](security-csrf.md),
-[http-requests.md](http-requests.md), [configuration.md](configuration.md).
+[http-requests.md](http-requests.md), [controllers.md](controllers.md),
+[configuration.md](configuration.md).
 
 ## Requirements
 
@@ -49,7 +50,9 @@ assertions, and unused code cheaply.
 
 ### Add a new route + controller
 
-1. Create `app/Http/Controllers/PostController.go`:
+1. Create `app/Http/Controllers/TagController.go`, embedding the base
+   `Controller` (see [controllers.md](controllers.md)) for consistency,
+   even if this particular controller declares no middleware of its own:
 
    ```go
    package controllers
@@ -60,14 +63,16 @@ assertions, and unused code cheaply.
        apphttp "Golite/app/Http"
    )
 
-   type PostController struct{}
-
-   func NewPostController() *PostController {
-       return &PostController{}
+   type TagController struct {
+       Controller
    }
 
-   func (p *PostController) Show(c *apphttp.Context) {
-       c.JSON(http.StatusOK, map[string]string{"post": c.Param("id")})
+   func NewTagController() *TagController {
+       return &TagController{}
+   }
+
+   func (t *TagController) Show(c *apphttp.Context) {
+       c.JSON(http.StatusOK, map[string]string{"tag": c.Param("id")})
    }
    ```
 
@@ -75,8 +80,8 @@ assertions, and unused code cheaply.
    with a parameter constraint and a name:
 
    ```go
-   postController := controllers.NewPostController()
-   kernel.GET("/posts/{id}", postController.Show).WhereNumber("id").Name("posts.show")
+   tagController := controllers.NewTagController()
+   kernel.GET("/tags/{id}", tagController.Show).WhereNumber("id").Name("tags.show")
    ```
 
 That's the whole change — `RouteServiceProvider` already calls
@@ -84,6 +89,29 @@ That's the whole change — `RouteServiceProvider` already calls
 [routing.md](routing.md) for the full set of route features (optional
 parameters with defaults, `where*` constraints, named routes and URL
 generation, groups, redirects, and the fallback route).
+
+### Register a full RESTful resource controller
+
+For a controller implementing several of the standard actions
+(`Index`/`Create`/`Store`/`Show`/`Edit`/`Update`/`Destroy`), skip the
+one-route-at-a-time approach above:
+
+```go
+postController := controllers.NewPostController(kernel.Container().Make("hash").(controllers.Hasher))
+
+kernel.Resource("posts", postController)                  // all 7 (or however many exist)
+kernel.ApiResource("posts", postController)                // 5, no Create/Edit
+kernel.Resource("posts", postController).Only([]string{"index", "show"})
+kernel.Resource("photos.comments", commentController).Shallow() // nested, with member routes promoted to /comments/{comment}
+kernel.Singleton("profile", profileController).Creatable() // no {id}; +Create/Store
+```
+
+A controller method only gets a route if it actually exists (checked via
+reflection) — no need to implement all 7 if a controller is naturally a
+subset (e.g. read-only). See [controllers.md](controllers.md) for the full
+route tables, nested/shallow semantics, and how controller-level
+middleware (`Controller.Middleware(...).Only(...)/.Except(...)`) attaches
+automatically to each generated route.
 
 ### Add a route group
 
@@ -247,6 +275,10 @@ middleware that normalize and secure that input before a handler sees it.
   `ParseMultipartForm`.** Add your own (e.g. `http.MaxBytesReader` around
   `Request.Body`) ahead of anything that calls `File`/`All` if you're
   fielding untrusted uploads. See [http-requests.md](http-requests.md#known-simplifications).
+- **`singularize` is a heuristic, not a full English inflector**, and
+  singleton resources don't support dot-notation nesting. Both are
+  reasonable, documented scope cuts — see
+  [controllers.md](controllers.md#singularize-a-deliberately-simple-heuristic).
 
 ## Import path / package naming gotcha
 

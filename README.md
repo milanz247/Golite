@@ -43,6 +43,14 @@ structs and interfaces instead of reflection-based magic.
   `TrimStrings`/`ConvertEmptyStringsToNull` input-normalization middleware
   and `TrustProxies`/`TrustHosts` for safely resolving the real client IP
   and rejecting Host header injection
+- A Laravel-standard controller layer: a base `Controller` every
+  controller can embed for its own per-action middleware
+  (`.Middleware("auth").Except("index", "show")`), constructor dependency
+  injection resolved from the service container, single-action
+  (`Invokable`) controllers, and `Route::resource`/`apiResource`/
+  `singleton` — reflection-based (a controller need only implement the
+  actions it has), with nested (`"photos.comments"`) and `.Shallow()`
+  routing, and `.Only(...)`/`.Except(...)` filtering
 
 ## Requirements
 
@@ -89,13 +97,14 @@ Golite/
 │   ├── Providers/     # Service providers (Register/Boot)
 │   └── Http/
 │       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
+│       ├── Resource.go        # Route::resource/apiResource/singleton, Invokable controllers
 │       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken, cookies, files
 │       ├── Input.go           # Unified input payload (query + JSON/form body)
 │       ├── Cookie.go          # AES-256-GCM cookie encryption
 │       ├── UploadedFile.go    # Uploaded file handling
 │       ├── Session.go         # In-memory SessionStore (crypto/rand-backed tokens)
 │       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, CSRF & normalization middleware
-│       └── Controllers/       # Route handlers
+│       └── Controllers/       # Base Controller + route handlers (resource, nested, singleton, invokable demos)
 ├── routes/           # Route definitions (routes/web.go)
 ├── docs/             # Full documentation (start at docs/README.md)
 └── public/           # Entry point (public/main.go)
@@ -105,8 +114,8 @@ Golite/
 
 Full framework documentation — architecture, the bootstrapping process, the
 request lifecycle, the service container, providers, routing, middleware,
-CSRF protection, HTTP request handling, configuration, and a developer
-guide — lives in [`docs/`](docs/README.md).
+CSRF protection, HTTP request handling, controllers & resource routing,
+configuration, and a developer guide — lives in [`docs/`](docs/README.md).
 
 ## Building and testing
 

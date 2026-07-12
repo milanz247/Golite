@@ -235,5 +235,9 @@ redirect, and a fallback — and is called from `RouteServiceProvider.Boot`
 (see [service-providers.md](service-providers.md)).
 
 See [middleware.md](middleware.md) for how the middleware pipeline itself
-works, and [request-lifecycle.md](request-lifecycle.md) for exactly when
-route matching happens relative to global middleware.
+works, [request-lifecycle.md](request-lifecycle.md) for exactly when
+route matching happens relative to global middleware, and
+[controllers.md](controllers.md) for `Route::resource`/`apiResource`/
+`singleton` — a layer built entirely on top of the primitives described
+here (`Kernel.addRoute`, `RouteDefinition.Name`/`Middleware`), registering
+several routes at once from a controller instead of one call per route.
