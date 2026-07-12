@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
+	apphttp "Golite/app/Http"
 	"Golite/container"
 )
 
@@ -28,9 +30,19 @@ func (h *Hasher) Make(value string) string {
 // container.
 type AppServiceProvider struct{}
 
-// Register binds the dummy "hash" service into the container.
+// Register binds the dummy "hash" service into the container, and
+// registers a sample response macro — Golite's equivalent of Laravel's
+// own convention of registering Response::macro(...) calls from
+// AppServiceProvider::boot(). "caps" wraps its argument, uppercased, in a
+// plain (auto-converted-to-text/html) Response; see
+// apphttp.ResponseFactory's doc comment and routes/web.go's "/shout"
+// route for how a handler invokes it via c.Macro("caps", ...).
 func (p *AppServiceProvider) Register(c *container.Container) {
 	c.Bind("hash", NewHasher())
+
+	apphttp.ResponseFactory.Macro("caps", func(val string) *apphttp.Response {
+		return apphttp.NewResponse(strings.ToUpper(val))
+	})
 }
 
 // Boot runs once every provider has had a chance to register its services.

@@ -1,7 +1,12 @@
 package routes
 
 import (
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"time"
 
 	apphttp "Golite/app/Http"
 	"Golite/app/Http/Controllers"
@@ -18,9 +23,11 @@ import (
 // middleware on one route (WithoutMiddleware), a middleware resolved
 // straight from the service container, CSRF protection, request-inspection
 // helpers, the unified input payload, encrypted cookies, flash/old input,
-// file uploads, and controller/resource routing (Resource, ApiResource,
+// file uploads, controller/resource routing (Resource, ApiResource,
 // nested + shallow resources, singleton resources, and a single-action
-// controller).
+// controller), and response handling (dynamic return-type serialization,
+// the fluent Response factory, redirects with flash data, specialized
+// formats — Json/View/Download/File/StreamDownload — and macros).
 func MapWebRoutes(kernel *apphttp.Kernel) {
 	userController := controllers.NewUserController()
 
@@ -224,8 +231,10 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 
 	kernel.POST("/contact", func(c *apphttp.Context) {
 		if !c.Has("email") {
-			c.Flash()
-			c.Redirect(http.StatusFound, "/contact")
+			// .WithInput() replaces the old manual c.Flash() call — same
+			// effect (flash the current input for the next request's
+			// Old()), now fluent off the redirect itself.
+			c.Redirect("/contact", http.StatusFound).WithInput().Send(c)
 			return
 		}
 		c.JSON(http.StatusOK, map[string]string{"status": "submitted"})
@@ -308,6 +317,94 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 		provisionController,
 		apphttp.InvokeAction,
 	).Name("server.provision")
+
+	// --- Response handling: dynamic return-type serialization, the
+	// fluent Response factory, redirects with flash data, specialized
+	// formats, and macros ---
+
+	// A tiny on-disk file for the Download/File demo routes below, created
+	// once at boot so they work after a fresh clone — storage/ is
+	// git-ignored, the same reason the file-upload demo from earlier
+	// generates its own storage/avatars directory rather than committing
+	// one.
+	demoFilePath := "storage/app/sample.txt"
+	if err := os.MkdirAll(filepath.Dir(demoFilePath), 0o755); err == nil {
+		_ = os.WriteFile(demoFilePath, []byte("Hello from Golite's file response demo!\n"), 0o644)
+	}
+
+	// Requirement 1: a handler wrapped in Responder can return a value
+	// instead of writing the response itself. A string is auto-sent as
+	// text/html; a struct/map/slice/array is auto-serialized to JSON.
+	kernel.GET("/greeting-text", apphttp.Responder(func(c *apphttp.Context) any {
+		return "Hello from a plain string return!" // -> text/html, 200
+	})).Name("response.string")
+
+	kernel.GET("/greeting-json", apphttp.Responder(func(c *apphttp.Context) any {
+		return map[string]any{"message": "Hello from a returned map!", "code": 200} // -> application/json, 200
+	})).Name("response.map")
+
+	// Requirement 2: the fluent Response factory — Status/Header/
+	// WithHeaders/Cookie/WithoutCookie, all composing regardless of which
+	// specialized format (if any) is chained afterward.
+	kernel.GET("/response/fluent", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Response(map[string]string{"status": "created"}, http.StatusCreated).
+			Header("X-Powered-By", "Golite").
+			WithHeaders(map[string]string{"X-Request-Id": "demo-123"}).
+			Cookie("last_visit", time.Now().Format(time.RFC3339), 60).
+			WithoutCookie("stale_session")
+	})).Name("response.fluent")
+
+	// .Json forces JSON regardless of the Go type of the content.
+	kernel.GET("/response/json", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Response(nil).Json([]string{"go", "is", "fun"})
+	})).Name("response.json")
+
+	// .View renders an html/template file from resources/views/.
+	kernel.GET("/welcome", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Response(nil).View("welcome", map[string]any{"Name": "World"})
+	})).Name("welcome")
+
+	// .Download forces a save-as download; .File serves the same kind of
+	// file inline (e.g. an image or PDF opening directly in the browser);
+	// .StreamDownload streams generated content straight to the client
+	// with no temporary file ever written to disk.
+	kernel.GET("/files/download", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Response(nil).Download(demoFilePath, "golite-sample.txt")
+	})).Name("files.download")
+
+	kernel.GET("/files/view", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Response(nil).File(demoFilePath)
+	})).Name("files.view")
+
+	kernel.GET("/files/report", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Response(nil).StreamDownload(func(w io.Writer) {
+			fmt.Fprintf(w, "Report generated at %s\n", time.Now().Format(time.RFC3339))
+			fmt.Fprintln(w, "No temp file was written to produce this.")
+		}, "report.txt")
+	})).Name("files.report")
+
+	// Requirement 3: redirects with flash data (.With for a one-off
+	// message, .WithInput — demonstrated on /contact above — for form
+	// repopulation), Back, and Away.
+	kernel.GET("/greet-redirect", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Redirect("/greeting-text").With("flash_message", "Redirected with a flashed message!")
+	})).Name("response.redirect")
+
+	kernel.GET("/go-back", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Back()
+	})).Name("response.back")
+
+	kernel.GET("/go-away", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Away("https://go.dev")
+	})).Name("response.away")
+
+	// Requirement 5: response macros. "caps" is registered once in
+	// AppServiceProvider.Register; c.Macro looks it up by name and invokes
+	// it (via reflection, since Go has no __callStatic-style dynamic
+	// dispatch) with whatever arguments are given here.
+	kernel.GET("/shout", apphttp.Responder(func(c *apphttp.Context) any {
+		return c.Macro("caps", "hello from a macro")
+	})).Name("response.macro")
 
 	// --- Redirect shortcut: Route::redirect($from, $to, $status) ---
 	kernel.Redirect("/home", "/user", http.StatusFound)

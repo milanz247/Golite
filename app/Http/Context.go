@@ -117,10 +117,58 @@ func (c *Context) JSON(status int, payload any) {
 	_ = json.NewEncoder(c.Writer).Encode(payload)
 }
 
-// Redirect writes an HTTP redirect response, the primitive behind
-// Kernel.Redirect (Route::redirect).
-func (c *Context) Redirect(status int, url string) {
-	http.Redirect(c.Writer, c.Request, url, status)
+// Response starts a fluent response (see the *Response type and its
+// chaining methods in Response.go): content is auto-converted the same
+// way a handler's raw return value is (see Responder/writeAutoResponse)
+// unless a specialized method (Json/View/Download/File/StreamDownload) is
+// chained afterward. status defaults to 200.
+func (c *Context) Response(content any, status ...int) *Response {
+	return NewResponse(content, status...)
+}
+
+// Redirect builds a redirect response to a (typically local, but not
+// required to be) URL, defaulting to 302 Found — Laravel's redirect()->to().
+func (c *Context) Redirect(to string, status ...int) *Response {
+	code := http.StatusFound
+	if len(status) > 0 {
+		code = status[0]
+	}
+	return &Response{kind: kindRedirect, redirectTo: to, status: code}
+}
+
+// Back redirects to the page the browser says it came from (the Referer
+// header), or "/" if there isn't one — Laravel's redirect()->back().
+func (c *Context) Back() *Response {
+	referer := c.Header("Referer")
+	if referer == "" {
+		referer = "/"
+	}
+	return c.Redirect(referer)
+}
+
+// Away redirects to an external URL — Laravel's redirect()->away(), which
+// exists there to bypass Laravel's URL generator (which would otherwise
+// try to resolve a relative-looking path against the app's own domain).
+// Golite's Redirect never does that kind of local resolution in the first
+// place — it just sets the Location header to whatever string it's
+// given, exactly like Go's own http.Redirect — so Away is provided for
+// API parity and to make the caller's intent explicit, but behaves
+// identically to Redirect.
+func (c *Context) Away(url string) *Response {
+	return c.Redirect(url)
+}
+
+// Macro invokes a response macro registered on ResponseFactory (see
+// Response.go) by name, returning the *Response it builds. Panics if the
+// macro doesn't exist or was called with the wrong arguments — see
+// macroRegistry.Call's doc comment for why that's the appropriate failure
+// mode here.
+func (c *Context) Macro(name string, args ...any) *Response {
+	resp, err := ResponseFactory.Call(name, args...)
+	if err != nil {
+		panic(err)
+	}
+	return resp
 }
 
 // Session resolves the current request's session, identified by the

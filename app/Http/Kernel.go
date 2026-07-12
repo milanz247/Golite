@@ -930,13 +930,16 @@ func (k *Kernel) Name(prefix string) *RouteGroup {
 
 // Redirect registers a route that redirects every common HTTP method from
 // one URI to another, equivalent to Route::redirect($from, $to, $status).
-// The default status is 302 Found, matching Laravel.
+// The default status is 302 Found, matching Laravel. Builds the redirect
+// via the same fluent Context.Redirect used elsewhere (see Response.go),
+// sending it directly since this handler is a plain HandlerFunc, not one
+// wrapped in Responder.
 func (k *Kernel) Redirect(from, to string, status int) *RouteDefinition {
 	if status == 0 {
 		status = http.StatusFound
 	}
 	return k.addRoute(allMethods, from, func(c *Context) {
-		c.Redirect(status, to)
+		c.Redirect(to, status).Send(c)
 	}, "", "", nil)
 }
 
