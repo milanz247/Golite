@@ -25,14 +25,21 @@ Golite/
 │   │   └── RouteServiceProvider.go   # Maps routes onto the kernel during Boot
 │   └── Http/
 │       ├── Kernel.go                 # Kernel, Middleware, RouteDefinition, RouteGroup — the router
-│       ├── Context.go                # Context struct + methods (JSON, Redirect, Session, CsrfToken, ...)
+│       ├── Context.go                # Context struct + methods (JSON, Redirect, Session, CsrfToken, files, ...)
+│       ├── Input.go                  # Unified input payload: All/Input/Query/Has/Only/Except/Boolean/Merge
+│       ├── Cookie.go                 # AES-256-GCM cookie encryption primitives
+│       ├── UploadedFile.go           # UploadedFile: IsValid/Path/Extension/Store/StoreAs
 │       ├── Session.go                # Session, SessionStore — in-memory, crypto/rand-backed
 │       ├── Middleware/
 │       │   ├── LoggerMiddleware.go          # Global, "after"-style middleware
 │       │   ├── MethodSpoofingMiddleware.go  # Global, "before"-style: PUT/PATCH/DELETE spoofing for HTML forms
 │       │   ├── RoleMiddleware.go            # Parameterized, struct-based (e.g. "role:editor,admin")
 │       │   ├── AuditMiddleware.go           # Terminable: Handle + Terminate, DI-resolvable via the container
-│       │   └── VerifyCsrfToken.go           # CSRF protection: session-bound token, Except wildcards, XSRF-TOKEN cookie
+│       │   ├── VerifyCsrfToken.go           # CSRF protection: session-bound token, Except wildcards, XSRF-TOKEN cookie
+│       │   ├── TrimStringsMiddleware.go             # Trims whitespace from every input string
+│       │   ├── ConvertEmptyStringsToNullMiddleware.go # "" input values -> nil, key kept
+│       │   ├── TrustProxiesMiddleware.go            # Resolves the real client IP from a trusted proxy's X-Forwarded-For
+│       │   └── TrustHosts.go                        # Rejects requests with an untrusted Host header
 │       └── Controllers/
 │           └── UserController.go     # Example controller
 ├── routes/
@@ -116,6 +123,28 @@ Golite/
   dropped. This was caught by testing (the cookie simply never appeared in
   the response) and fixed by reordering; see
   [security-csrf.md](security-csrf.md#the-xsrf-token-cookie-and-a-go-specific-ordering-fix).
+- **`Context.Ip()` never reads a forwarded-for header itself.** Only
+  `TrustProxiesMiddleware`, after validating the immediate TCP peer is an
+  actually-trusted proxy, is allowed to promote a forwarded address into
+  `Request.RemoteAddr` — which is the only thing `Ip()` reads. Putting the
+  trust decision in exactly one place, upstream, means every consumer of
+  `Ip()` inherits it automatically instead of needing to re-implement (or
+  forget to implement) the same validation. See
+  [http-requests.md](http-requests.md#ip-is-deliberately-dumb--trustproxiesmiddleware-is-what-makes-it-safe).
+- **`Kernel.appKey` (cookie encryption) is generated fresh every process
+  restart, like `SessionStore`.** Golite is a single-process, no-persistence
+  framework today; a key that doesn't survive a restart is an honest
+  reflection of that rather than a half-real "persistent" key. Decryption
+  failure (including from a stale pre-restart cookie) returns
+  `ErrInvalidCookie`, not a panic — it fails safe. See
+  [http-requests.md](http-requests.md#kernelappkey-generated-per-process-not-loaded-from-config).
+- **Flash data ages in exactly one hook, `Context.Session()`, guarded by
+  the same idempotency check that already makes `Session()` safe to call
+  more than once per request.** This is what gives `Flash`/`Old` Laravel's
+  real one-request-only visibility (verified directly: readable on request
+  *N+1*, gone by *N+2*) without a separate "start of request" hook the
+  Kernel would otherwise need to call explicitly. See
+  [http-requests.md](http-requests.md#one-shot-semantics-visible-on-the-next-request-then-gone).
 
 See [bootstrapping.md](bootstrapping.md) for how the pieces are wired
 together at startup, and [request-lifecycle.md](request-lifecycle.md) for

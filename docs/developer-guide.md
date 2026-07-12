@@ -7,7 +7,7 @@ conceptual background behind each of these, see:
 [service-container.md](service-container.md),
 [service-providers.md](service-providers.md), [routing.md](routing.md),
 [middleware.md](middleware.md), [security-csrf.md](security-csrf.md),
-[configuration.md](configuration.md).
+[http-requests.md](http-requests.md), [configuration.md](configuration.md).
 
 ## Requirements
 
@@ -195,6 +195,34 @@ The client must echo the token back via the `_token` form field,
 session it depends on and the `Except` wildcard exclusions for things like
 payment webhooks.
 
+### Read request input, set a cookie, or handle a file upload
+
+```go
+// merges query + JSON/form body; body wins on collision
+name := c.Input("name", "anonymous")
+if !c.Has("email") {
+    c.JSON(http.StatusUnprocessableEntity, map[string]string{"error": "email is required"})
+    return
+}
+subscribed := c.Boolean("newsletter") // "1"/"true"/"on"/"yes" -> true
+
+_ = c.SetCookie("preferred_theme", "dark", 3600) // AES-256-GCM encrypted + authenticated
+theme, err := c.Cookie("preferred_theme")        // ErrInvalidCookie if missing/tampered/stale key
+
+if c.HasFile("avatar") {
+    file, err := c.File("avatar")
+    if err == nil && file.IsValid() {
+        path, err := file.Store("storage/avatars") // auto-generated unique filename
+    }
+}
+```
+
+See [http-requests.md](http-requests.md) for the full API (`All`/`Query`/
+`Only`/`Except`/`Merge`/..., `Flash`/`Old` for form repopulation after a
+redirect, `UploadedFile`'s `Extension`/`Store`/`StoreAs`) and the global
+`TrimStrings`/`ConvertEmptyStringsToNull`/`TrustProxies`/`TrustHosts`
+middleware that normalize and secure that input before a handler sees it.
+
 ## Known limitations / extension points
 
 - **Optional parameters must trail the route.** `/a/{b?}/{c}` (required
@@ -211,6 +239,14 @@ payment webhooks.
   explicit.
 - **Sessions are in-memory and process-local**, with no expiry or
   persistence. See [security-csrf.md](security-csrf.md#session-and-sessionstore).
+- **Cookie encryption key (`Kernel.appKey`) is also process-local** — a
+  cookie set before a restart won't decrypt after one (`Context.Cookie`
+  returns `ErrInvalidCookie`, not a crash). Same tradeoff as sessions, for
+  the same reason. See [http-requests.md](http-requests.md#kernelappkey-generated-per-process-not-loaded-from-config).
+- **No request size limit beyond the 32 MiB passed to
+  `ParseMultipartForm`.** Add your own (e.g. `http.MaxBytesReader` around
+  `Request.Body`) ahead of anything that calls `File`/`All` if you're
+  fielding untrusted uploads. See [http-requests.md](http-requests.md#known-simplifications).
 
 ## Import path / package naming gotcha
 

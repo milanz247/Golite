@@ -33,6 +33,16 @@ structs and interfaces instead of reflection-based magic.
   `VerifyCsrfToken` middleware (checked against the `_token` field,
   `X-CSRF-TOKEN`, or `X-XSRF-TOKEN`, in constant time), wildcard `Except`
   path exclusions, and an auto-synced `XSRF-TOKEN` cookie for Axios/Angular
+- A full Laravel-style request API on `Context`: inspection helpers
+  (`Path`/`Is`/`Url`/`FullUrl`/`Method`/`Ip`/`BearerToken`/`ExpectsJson`), a
+  unified input payload merging query/JSON/form data (`All`/`Input`/`Query`/
+  `Has`/`Only`/`Except`/`Boolean`/`Merge`), AES-256-GCM encrypted +
+  authenticated cookies, one-shot flash data (`Flash`/`Old`, for
+  form-repopulation-after-redirect), and file uploads (`HasFile`/`File`,
+  `UploadedFile.Store`/`StoreAs` with content-sniffed extensions) — plus
+  `TrimStrings`/`ConvertEmptyStringsToNull` input-normalization middleware
+  and `TrustProxies`/`TrustHosts` for safely resolving the real client IP
+  and rejecting Host header injection
 
 ## Requirements
 
@@ -79,9 +89,12 @@ Golite/
 │   ├── Providers/     # Service providers (Register/Boot)
 │   └── Http/
 │       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
-│       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken
+│       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken, cookies, files
+│       ├── Input.go           # Unified input payload (query + JSON/form body)
+│       ├── Cookie.go          # AES-256-GCM cookie encryption
+│       ├── UploadedFile.go    # Uploaded file handling
 │       ├── Session.go         # In-memory SessionStore (crypto/rand-backed tokens)
-│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable & CSRF middleware
+│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, CSRF & normalization middleware
 │       └── Controllers/       # Route handlers
 ├── routes/           # Route definitions (routes/web.go)
 ├── docs/             # Full documentation (start at docs/README.md)
@@ -92,8 +105,8 @@ Golite/
 
 Full framework documentation — architecture, the bootstrapping process, the
 request lifecycle, the service container, providers, routing, middleware,
-CSRF protection, configuration, and a developer guide — lives in
-[`docs/`](docs/README.md).
+CSRF protection, HTTP request handling, configuration, and a developer
+guide — lives in [`docs/`](docs/README.md).
 
 ## Building and testing
 

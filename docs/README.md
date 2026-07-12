@@ -8,5 +8,6 @@
 - [Routing](routing.md) — the regex route engine: verbs, parameters, `where*` constraints, named routes & URL generation, groups, redirects, fallback, 405 handling
 - [Middleware](middleware.md) — global/route/grouped middleware registries, priority sorting, parameterized middleware, `WithoutMiddleware`, terminable middleware, container-resolved DI
 - [CSRF Protection](security-csrf.md) — the session mechanism, `Context.CsrfToken()`, `VerifyCsrfToken`, wildcard exclusions, the `XSRF-TOKEN` cookie
+- [HTTP Request Handling](http-requests.md) — request inspection helpers, the unified input payload, encrypted cookies, flash/old input, file uploads, `TrimStrings`/`ConvertEmptyStringsToNull`/`TrustProxies`/`TrustHosts`
 - [Configuration](configuration.md) — `.env`, `config.LoadConfig()`, adding new config values
 - [Developer Guide](developer-guide.md) — practical how-tos: running the app, adding routes/services/providers/middleware, known limitations
