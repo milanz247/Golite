@@ -1,7 +1,6 @@
 package http
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -56,106 +55,9 @@ type TerminableMiddleware interface {
 	Terminate(c *Context)
 }
 
-// ---------------------------------------------------------------------------
-// Context
-// ---------------------------------------------------------------------------
-
-// Context wraps the request/response pair together with the application's
-// service container (Laravel's Application itself extends Container, so
-// resolving services through App mirrors Laravel's `app()->make(...)`),
-// the resolved route parameters, a middleware/handler pipeline, and a
-// small per-request key/value store.
-type Context struct {
-	Writer  http.ResponseWriter
-	Request *http.Request
-	App     *container.Container
-
-	handlers []HandlerFunc
-	index    int
-	params   map[string]string
-
-	store    map[string]any
-	executed []Middleware
-}
-
-func newContext(w http.ResponseWriter, r *http.Request, app *container.Container, handlers []HandlerFunc) *Context {
-	return &Context{
-		Writer:   w,
-		Request:  r,
-		App:      app,
-		handlers: handlers,
-		index:    -1,
-	}
-}
-
-// Next invokes the next handler in the chain, if any, and returns once it
-// (and everything it in turn calls Next on) has finished — the classic
-// recursive "onion" middleware pattern. A middleware that wants to run code
-// after the rest of the chain finishes should call Next and then continue
-// below it, just like Laravel's pipeline; a middleware that wants to
-// short-circuit the request (e.g. failed auth) simply returns *without*
-// calling Next, and nothing further down the chain ever runs. Handlers
-// appended to the chain *while* Next is running (see Kernel.dispatch, which
-// splices in route-specific middleware only once routing has been
-// resolved) are picked up correctly, since each call re-checks
-// len(c.handlers) against the freshly incremented index.
-func (c *Context) Next() {
-	c.index++
-	if c.index < len(c.handlers) {
-		c.handlers[c.index](c)
-	}
-}
-
-// Param returns the value of a resolved route parameter (e.g. "id" for a
-// route defined as "/user/{id}"), or "" if it wasn't present and had no
-// default.
-func (c *Context) Param(name string) string {
-	if c.params == nil {
-		return ""
-	}
-	return c.params[name]
-}
-
-// Params returns a copy of every resolved route parameter for the current
-// request, analogous to Laravel's $request->route()->parameters().
-func (c *Context) Params() map[string]string {
-	out := make(map[string]string, len(c.params))
-	for k, v := range c.params {
-		out[k] = v
-	}
-	return out
-}
-
-// Set stores an arbitrary value on the request, keyed by name. Its main
-// purpose is letting a middleware pass data from Handle to its own
-// Terminate — a middleware instance is shared across every concurrent
-// request, so it must never store per-request state on itself; Context is
-// the per-request, goroutine-safe place for that instead.
-func (c *Context) Set(key string, value any) {
-	if c.store == nil {
-		c.store = make(map[string]any)
-	}
-	c.store[key] = value
-}
-
-// Get retrieves a value previously stored with Set.
-func (c *Context) Get(key string) (any, bool) {
-	v, ok := c.store[key]
-	return v, ok
-}
-
-// JSON writes a JSON response with the given status code.
-func (c *Context) JSON(status int, payload any) {
-	c.Writer.Header().Set("Content-Type", "application/json")
-	c.Writer.WriteHeader(status)
-	_ = json.NewEncoder(c.Writer).Encode(payload)
-}
-
-// Redirect writes an HTTP redirect response, the primitive behind
-// Kernel.Redirect (Route::redirect).
-func (c *Context) Redirect(status int, url string) {
-	http.Redirect(c.Writer, c.Request, url, status)
-}
+// Context itself — its struct definition, constructor, and methods
+// (including Session/CsrfToken) — lives in Context.go; Session/SessionStore
+// live in Session.go. Both are part of this same package.
 
 // ---------------------------------------------------------------------------
 // Middleware spec parsing and name normalization shared by RouteDefinition,
@@ -721,18 +623,30 @@ type Kernel struct {
 	// serving requests.
 	MiddlewarePriority []string
 
+	sessions *SessionStore
+
 	routes      []*RouteDefinition
 	namedRoutes map[string]*RouteDefinition
 	fallback    *RouteDefinition
 }
 
-// NewKernel creates a Kernel bound to the given service container.
+// NewKernel creates a Kernel bound to the given service container. The
+// "web" middleware group is seeded with "csrf" by default — mirroring
+// Laravel's own Kernel.php, which always includes VerifyCsrfToken in its
+// $middlewareGroups['web'] — though the "csrf" name only does anything
+// once something registers it, e.g. via
+// kernel.AliasMiddleware("csrf", middleware.NewVerifyCsrfToken(...)) in
+// routes/web.go; Kernel.go itself can't reference that concrete type
+// without an import cycle (app/Http/Middleware already imports app/Http).
 func NewKernel(c *container.Container) *Kernel {
 	k := &Kernel{
-		container:        c,
-		RouteMiddleware:  make(map[string]Middleware),
-		MiddlewareGroups: make(map[string][]string),
-		namedRoutes:      make(map[string]*RouteDefinition),
+		container:       c,
+		RouteMiddleware: make(map[string]Middleware),
+		MiddlewareGroups: map[string][]string{
+			"web": {"csrf"},
+		},
+		namedRoutes: make(map[string]*RouteDefinition),
+		sessions:    NewSessionStore(),
 	}
 	setDefaultKernel(k)
 	return k
@@ -744,6 +658,14 @@ func NewKernel(c *container.Container) *Kernel {
 // — see the "role"/"audit" middleware in routes/web.go for an example.
 func (k *Kernel) Container() *container.Container {
 	return k.container
+}
+
+// Sessions returns the kernel's session store. Most code should go through
+// Context.Session()/Context.CsrfToken() instead; this exists for the rare
+// case something outside a request (a scheduled job, a test) needs direct
+// access.
+func (k *Kernel) Sessions() *SessionStore {
+	return k.sessions
 }
 
 // UseMiddleware registers one or more global middleware, executed on every
@@ -1128,7 +1050,7 @@ func (k *Kernel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	chain = append(chain, k.dispatch)
 
-	ctx := newContext(w, r, k.container, chain)
+	ctx := newContext(w, r, k.container, k.sessions, chain)
 	ctx.Next()
 
 	k.terminate(ctx)

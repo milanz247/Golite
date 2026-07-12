@@ -15,16 +15,25 @@ import (
 // with URL generation, nested groups (prefix + middleware + name prefix), a
 // redirect, a fallback route, middleware priority, middleware groups,
 // parameterized middleware ("role:editor,admin"), excluding a group's
-// middleware on one route (WithoutMiddleware), and a middleware resolved
-// straight from the service container.
+// middleware on one route (WithoutMiddleware), a middleware resolved
+// straight from the service container, and CSRF protection.
 func MapWebRoutes(kernel *apphttp.Kernel) {
 	userController := controllers.NewUserController()
 
 	// --- Middleware priority: regardless of the order middleware is
 	// assigned on a route or pulled in via a group, it always executes in
 	// this order (anything not listed here runs last, in registration
-	// order) — equivalent to Laravel's $middlewarePriority. ---
-	kernel.MiddlewarePriority = []string{"auth", "role", "audit"}
+	// order) — equivalent to Laravel's $middlewarePriority. CSRF runs
+	// first, mirroring Laravel's own ordering (session/CSRF concerns ahead
+	// of anything that depends on them). ---
+	kernel.MiddlewarePriority = []string{"csrf", "auth", "role", "audit"}
+
+	// --- CSRF protection: NewKernel already seeds the "web" middleware
+	// group with the name "csrf" (see Kernel.go), but that name only does
+	// something once it's aliased to a real implementation here. "/stripe/*"
+	// and "/api/v1/webhooks" are exempt — third-party services can't supply
+	// a session-bound token, so they're excluded by path instead. ---
+	kernel.AliasMiddleware("csrf", middleware.NewVerifyCsrfToken("/stripe/*", "/api/v1/webhooks"))
 
 	// --- Route middleware: name -> Middleware, equivalent to Laravel's
 	// $routeMiddleware / Route::aliasMiddleware(). "auth" is a plain
@@ -124,6 +133,24 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 			posts.GET("/{post}", resourceHandler("admin.posts.show")).WhereNumber("post").Name("show") // GET /admin/posts/{post}
 		})
 	})
+
+	// --- CSRF-protected form flow: a GET establishes the session and
+	// returns its token (in a real app, rendered into a hidden
+	// <input type="hidden" name="_token"> field or a <meta
+	// name="csrf-token"> tag via c.CsrfToken()); the matching POST must
+	// echo that token back via the "_token" field, X-CSRF-TOKEN, or
+	// X-XSRF-TOKEN, or it's rejected with 419. ---
+	kernel.GET("/comments", func(c *apphttp.Context) {
+		c.JSON(http.StatusOK, map[string]string{"csrf_token": c.CsrfToken()})
+	}).Middleware("csrf").Name("comments.form")
+
+	kernel.POST("/comments", resourceHandler("comments.store")).Middleware("csrf").Name("comments.store")
+
+	// A third-party webhook: state-changing (POST), but it can't carry our
+	// session's CSRF token, so it's exempted via VerifyCsrfToken's Except
+	// list ("/stripe/*") rather than by omitting the "csrf" middleware —
+	// the same middleware runs, it just lets this path through.
+	kernel.POST("/stripe/webhook", resourceHandler("stripe.webhook")).Middleware("csrf").Name("stripe.webhook")
 
 	// --- Redirect shortcut: Route::redirect($from, $to, $status) ---
 	kernel.Redirect("/home", "/user", http.StatusFound)
