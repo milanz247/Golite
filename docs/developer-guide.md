@@ -65,20 +65,38 @@ assertions, and unused code cheaply.
        return &PostController{}
    }
 
-   func (p *PostController) Index(c *apphttp.Context) {
-       c.JSON(http.StatusOK, map[string]any{"posts": []string{}})
+   func (p *PostController) Show(c *apphttp.Context) {
+       c.JSON(http.StatusOK, map[string]string{"post": c.Param("id")})
    }
    ```
 
-2. Register the route in [`routes/web.go`](../routes/web.go):
+2. Register the route in [`routes/web.go`](../routes/web.go), optionally
+   with a parameter constraint and a name:
 
    ```go
    postController := controllers.NewPostController()
-   kernel.GET("/posts", postController.Index)
+   kernel.GET("/posts/{id}", postController.Show).WhereNumber("id").Name("posts.show")
    ```
 
 That's the whole change — `RouteServiceProvider` already calls
-`MapWebRoutes` during boot, so no other file needs touching.
+`MapWebRoutes` during boot, so no other file needs touching. See
+[routing.md](routing.md) for the full set of route features (optional
+parameters with defaults, `where*` constraints, named routes and URL
+generation, groups, redirects, and the fallback route).
+
+### Add a route group
+
+```go
+kernel.Prefix("admin").Middleware("auth").Name("admin.").Group(func(admin *apphttp.RouteGroup) {
+    admin.GET("/users", userController.Index).Name("users") // GET /admin/users, "admin.users"
+})
+```
+
+`Prefix`/`Middleware`/`Name` can be chained in any order and nested
+(`admin.Prefix("posts").Group(...)` inside the closure above) — each call
+returns a new `*RouteGroup` that extends the parent's attributes rather
+than mutating it. See
+[routing.md](routing.md#route-groups).
 
 ### Add a new service (bind + resolve)
 
@@ -114,7 +132,23 @@ See [service-providers.md](service-providers.md#writing-your-own-provider).
 
 See [middleware.md](middleware.md#writing-your-own-middleware). Remember to
 register it in `public/main.go` via `app.Kernel.UseMiddleware(...)` — it
-won't run otherwise.
+won't run otherwise. Global middleware always runs *before* routing is
+resolved (see [request-lifecycle.md](request-lifecycle.md)), which matters
+for anything that can change which route matches, like
+`MethodSpoofingMiddleware`.
+
+### Add middleware scoped to a route or group
+
+Register a named alias once, then reference it by string wherever needed:
+
+```go
+kernel.AliasMiddleware("auth", appMiddleware.Authenticate())
+
+kernel.GET("/account", handler).Middleware("auth")
+kernel.Prefix("admin").Middleware("auth").Group(func(r *apphttp.RouteGroup) { ... })
+```
+
+See [middleware.md](middleware.md#middleware-aliases).
 
 ### Add a new config value
 
@@ -122,12 +156,14 @@ See [configuration.md](configuration.md#adding-a-new-config-value).
 
 ## Known limitations / extension points
 
-- **No route parameters or wildcards.** Routing is exact-path matching only
-  (see [routing.md](routing.md)). Add parsing to `Kernel`'s route
-  table/lookup if you need `/user/{id}`-style routes.
-- **No per-route middleware**, only global. See
-  [middleware.md](middleware.md#extending-to-per-route-middleware) for the
-  suggested extension point.
+- **Optional parameters must trail the route.** `/a/{b?}/{c}` (required
+  after optional) isn't specially handled — same constraint Laravel
+  imposes. See [routing.md](routing.md#route-parameters).
+- **Route matching is a linear scan** over the registered routes (trying
+  each in registration order), not a radix/trie structure. This is the same
+  approach Laravel itself uses and is fine at the route counts a
+  lightweight framework expects; if the route table grows very large, a
+  trie keyed by static path segments would be the natural next step.
 - **The container has no auto-wiring.** `Bind`/`Make` are name + manual
   type-assertion based, on purpose — there's no reflection-based
   constructor injection like Laravel's automatic resolution. Keep bindings

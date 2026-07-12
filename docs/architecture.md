@@ -24,9 +24,10 @@ Golite/
 │   │   ├── AppServiceProvider.go     # Binds core app services (e.g. "hash")
 │   │   └── RouteServiceProvider.go   # Maps routes onto the kernel during Boot
 │   └── Http/
-│       ├── Kernel.go                 # Kernel (http.Handler) + Context + HandlerFunc
+│       ├── Kernel.go                 # Kernel, Context, HandlerFunc, RouteDefinition, RouteGroup — the router
 │       ├── Middleware/
-│       │   └── LoggerMiddleware.go   # Example global middleware
+│       │   ├── LoggerMiddleware.go          # Example global middleware
+│       │   └── MethodSpoofingMiddleware.go  # PUT/PATCH/DELETE spoofing for HTML forms
 │       └── Controllers/
 │           └── UserController.go     # Example controller
 ├── routes/
@@ -70,6 +71,22 @@ Golite/
   `http.HandlerFunc`. Any file that needs both packages imports Golite's as
   `apphttp` to avoid a naming collision — see any file under `app/Providers`,
   `app/Http/Controllers`, `app/Http/Middleware`, `routes`, or `public`.
+- **The registered-route type is `RouteDefinition`, not `Route`.** Laravel's
+  global URL helper is `route($name, $params)`; Golite mirrors it as a
+  package-level function `apphttp.Route(name, params)` (see
+  [routing.md](routing.md#named-routes-and-url-generation)). Go doesn't
+  allow a top-level function and a top-level type to share an identifier in
+  the same package, so the struct that `kernel.GET(...)` etc. return is
+  named `RouteDefinition` instead, freeing up `Route` for the URL-generation
+  helper.
+- **`Context.Next()` is recursive, not an iterating loop.** An earlier
+  iterative (Gin-style `for`) implementation kept advancing to the next
+  handler regardless of whether the current one called `Next()`, so a
+  middleware that returned early (e.g. failed auth) didn't actually stop
+  the chain — the controller ran anyway and double-wrote the response. The
+  recursive form in `app/Http/Kernel.go` makes "don't call `Next()`" a real
+  short-circuit, with no separate `Abort()` needed. See
+  [middleware.md](middleware.md#how-the-chain-runs--contextnext).
 
 See [bootstrapping.md](bootstrapping.md) for how the pieces are wired
 together at startup, and [request-lifecycle.md](request-lifecycle.md) for

@@ -10,9 +10,17 @@ structs and interfaces instead of reflection-based magic.
 - Thread-safe IoC container (`Bind` / `Make`)
 - `.env`-based configuration (`github.com/joho/godotenv`)
 - Service providers with a `Register()` / `Boot()` lifecycle
-- An HTTP kernel (`http.Handler`) with a global middleware pipeline and
-  simple route registration
-- Example `LoggerMiddleware` and `UserController` wired end to end
+- An HTTP kernel (`http.Handler`) with a recursive middleware pipeline
+- A native, Laravel-style routing engine (no external router): HTTP verb
+  helpers (`GET`/`POST`/`PUT`/`PATCH`/`DELETE`/`OPTIONS`, `Match`, `Any`),
+  required/optional `{param}` segments with defaults, regex constraints
+  (`Where`, `WhereNumber`, `WhereAlpha`, `WhereAlphaNumeric`, `WhereIn`),
+  named routes with URL generation, nested route groups (prefix +
+  middleware + name prefix), redirects, a fallback route, and proper
+  404/405 handling
+- Named middleware aliases plus `LoggerMiddleware` and
+  `MethodSpoofingMiddleware` (PUT/PATCH/DELETE via `_method` or
+  `X-HTTP-Method-Override`, for plain HTML forms)
 
 ## Requirements
 
@@ -58,8 +66,8 @@ Golite/
 ├── app/
 │   ├── Providers/     # Service providers (Register/Boot)
 │   └── Http/
-│       ├── Kernel.go          # Router + middleware pipeline (http.Handler)
-│       ├── Middleware/        # Global middleware
+│       ├── Kernel.go          # Regex router, groups, named routes, middleware pipeline (http.Handler)
+│       ├── Middleware/        # Global + aliasable middleware (Logger, MethodSpoofing)
 │       └── Controllers/       # Route handlers
 ├── routes/           # Route definitions (routes/web.go)
 ├── docs/             # Full documentation (start at docs/README.md)
