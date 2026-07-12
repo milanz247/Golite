@@ -1,10 +1,12 @@
 # Middleware
 
 Files: [`app/Http/Kernel.go`](../app/Http/Kernel.go),
+[`app/Http/Context.go`](../app/Http/Context.go),
 [`app/Http/Middleware/LoggerMiddleware.go`](../app/Http/Middleware/LoggerMiddleware.go),
 [`app/Http/Middleware/MethodSpoofingMiddleware.go`](../app/Http/Middleware/MethodSpoofingMiddleware.go),
 [`app/Http/Middleware/RoleMiddleware.go`](../app/Http/Middleware/RoleMiddleware.go),
-[`app/Http/Middleware/AuditMiddleware.go`](../app/Http/Middleware/AuditMiddleware.go)
+[`app/Http/Middleware/AuditMiddleware.go`](../app/Http/Middleware/AuditMiddleware.go),
+[`app/Http/Middleware/VerifyCsrfToken.go`](../app/Http/Middleware/VerifyCsrfToken.go)
 
 Golite's middleware system mirrors Laravel's in full: three distinct
 registries (global, named/aliased, grouped), middleware parameters
@@ -415,3 +417,13 @@ Then register it either:
 - as a **named alias** — `kernel.AliasMiddleware("throttle", NewThrottle(limiter))`, then `.Middleware("throttle")`
 - **through the container** — `kernel.Container().Bind("throttle", NewThrottle(limiter))`, then `.Middleware("throttle")`
 - as a **group member** — `kernel.MiddlewareGroup("api", "throttle", "auth")`
+
+## `VerifyCsrfToken`
+
+Golite's fifth example middleware, and its most involved: a
+parameterized-free but session-dependent struct that reads/writes cookies,
+compares a token in constant time, and exempts paths via a wildcard
+`Except` list. It's also seeded into the `"web"` middleware group by
+`NewKernel` itself, by name only, to avoid an import cycle. Full writeup,
+including a Go-specific cookie-ordering fix that was only caught by
+end-to-end testing, in [security-csrf.md](security-csrf.md).

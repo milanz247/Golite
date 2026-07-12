@@ -28,6 +28,11 @@ structs and interfaces instead of reflection-based magic.
   `_method` or `X-HTTP-Method-Override`, for plain HTML forms),
   `RoleMiddleware` (parameterized), and `AuditMiddleware` (terminable) as
   worked examples
+- An in-memory, `crypto/rand`-backed session store (`Context.Session()`)
+  and Laravel-style CSRF protection: `Context.CsrfToken()`,
+  `VerifyCsrfToken` middleware (checked against the `_token` field,
+  `X-CSRF-TOKEN`, or `X-XSRF-TOKEN`, in constant time), wildcard `Except`
+  path exclusions, and an auto-synced `XSRF-TOKEN` cookie for Axios/Angular
 
 ## Requirements
 
@@ -74,7 +79,9 @@ Golite/
 │   ├── Providers/     # Service providers (Register/Boot)
 │   └── Http/
 │       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
-│       ├── Middleware/        # Global, aliased, grouped, parameterized & terminable middleware
+│       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken
+│       ├── Session.go         # In-memory SessionStore (crypto/rand-backed tokens)
+│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable & CSRF middleware
 │       └── Controllers/       # Route handlers
 ├── routes/           # Route definitions (routes/web.go)
 ├── docs/             # Full documentation (start at docs/README.md)
@@ -85,7 +92,8 @@ Golite/
 
 Full framework documentation — architecture, the bootstrapping process, the
 request lifecycle, the service container, providers, routing, middleware,
-configuration, and a developer guide — lives in [`docs/`](docs/README.md).
+CSRF protection, configuration, and a developer guide — lives in
+[`docs/`](docs/README.md).
 
 ## Building and testing
 

@@ -53,6 +53,8 @@ func (k *Kernel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 ## How `Context.Next()` runs the chain
 
+File: [`app/Http/Context.go`](../app/Http/Context.go)
+
 ```go
 func (c *Context) Next() {
 	c.index++

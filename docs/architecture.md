@@ -24,12 +24,15 @@ Golite/
 │   │   ├── AppServiceProvider.go     # Binds core app services (e.g. "hash")
 │   │   └── RouteServiceProvider.go   # Maps routes onto the kernel during Boot
 │   └── Http/
-│       ├── Kernel.go                 # Kernel, Context, Middleware, RouteDefinition, RouteGroup — the router
+│       ├── Kernel.go                 # Kernel, Middleware, RouteDefinition, RouteGroup — the router
+│       ├── Context.go                # Context struct + methods (JSON, Redirect, Session, CsrfToken, ...)
+│       ├── Session.go                # Session, SessionStore — in-memory, crypto/rand-backed
 │       ├── Middleware/
 │       │   ├── LoggerMiddleware.go          # Global, "after"-style middleware
 │       │   ├── MethodSpoofingMiddleware.go  # Global, "before"-style: PUT/PATCH/DELETE spoofing for HTML forms
 │       │   ├── RoleMiddleware.go            # Parameterized, struct-based (e.g. "role:editor,admin")
-│       │   └── AuditMiddleware.go           # Terminable: Handle + Terminate, DI-resolvable via the container
+│       │   ├── AuditMiddleware.go           # Terminable: Handle + Terminate, DI-resolvable via the container
+│       │   └── VerifyCsrfToken.go           # CSRF protection: session-bound token, Except wildcards, XSRF-TOKEN cookie
 │       └── Controllers/
 │           └── UserController.go     # Example controller
 ├── routes/
@@ -47,7 +50,8 @@ Golite/
 | `bootstrap/app.go`                        | `bootstrap/app.php`                          |
 | `app/Providers/*ServiceProvider.go`       | `app/Providers/*ServiceProvider.php`         |
 | `app/Http/Kernel.go` (`Kernel`)           | `app/Http/Kernel.php`                        |
-| `app/Http/Kernel.go` (`Context`)          | `Illuminate\Http\Request` + response helpers |
+| `app/Http/Context.go` (`Context`)         | `Illuminate\Http\Request` + response helpers |
+| `app/Http/Session.go`                     | `Illuminate\Session\Store` + a driver        |
 | `app/Http/Middleware/*.go`                | `app/Http/Middleware/*.php`                  |
 | `app/Http/Controllers/*.go`               | `app/Http/Controllers/*.php`                 |
 | `routes/web.go`                           | `routes/web.php`                             |
@@ -86,7 +90,7 @@ Golite/
   handler regardless of whether the current one called `Next()`, so a
   middleware that returned early (e.g. failed auth) didn't actually stop
   the chain — the controller ran anyway and double-wrote the response. The
-  recursive form in `app/Http/Kernel.go` makes "don't call `Next()`" a real
+  recursive form in `app/Http/Context.go` makes "don't call `Next()`" a real
   short-circuit, with no separate `Abort()` needed. See
   [middleware.md](middleware.md#how-the-chain-runs--contextnext).
 - **Middleware is an interface (`Handle(c, next, params...)`), not just a
@@ -103,6 +107,15 @@ Golite/
   `Terminate` through the (per-request, goroutine-safe) `Context` instead —
   see `AuditMiddleware` and
   [middleware.md](middleware.md#terminable-middleware).
+- **`VerifyCsrfToken` sets its cookie *before* calling `next()`, not after,
+  unlike Laravel.** Laravel adds the `XSRF-TOKEN` cookie once
+  `$next($request)` returns, because PHP's `Response` stays a mutable
+  object until the framework explicitly flushes it. Go's
+  `http.ResponseWriter` streams headers immediately — once a downstream
+  handler calls `WriteHeader`, any header set afterward is silently
+  dropped. This was caught by testing (the cookie simply never appeared in
+  the response) and fixed by reordering; see
+  [security-csrf.md](security-csrf.md#the-xsrf-token-cookie-and-a-go-specific-ordering-fix).
 
 See [bootstrapping.md](bootstrapping.md) for how the pieces are wired
 together at startup, and [request-lifecycle.md](request-lifecycle.md) for
