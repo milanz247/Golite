@@ -24,10 +24,12 @@ Golite/
 │   │   ├── AppServiceProvider.go     # Binds core app services (e.g. "hash")
 │   │   └── RouteServiceProvider.go   # Maps routes onto the kernel during Boot
 │   └── Http/
-│       ├── Kernel.go                 # Kernel, Context, HandlerFunc, RouteDefinition, RouteGroup — the router
+│       ├── Kernel.go                 # Kernel, Context, Middleware, RouteDefinition, RouteGroup — the router
 │       ├── Middleware/
-│       │   ├── LoggerMiddleware.go          # Example global middleware
-│       │   └── MethodSpoofingMiddleware.go  # PUT/PATCH/DELETE spoofing for HTML forms
+│       │   ├── LoggerMiddleware.go          # Global, "after"-style middleware
+│       │   ├── MethodSpoofingMiddleware.go  # Global, "before"-style: PUT/PATCH/DELETE spoofing for HTML forms
+│       │   ├── RoleMiddleware.go            # Parameterized, struct-based (e.g. "role:editor,admin")
+│       │   └── AuditMiddleware.go           # Terminable: Handle + Terminate, DI-resolvable via the container
 │       └── Controllers/
 │           └── UserController.go     # Example controller
 ├── routes/
@@ -87,6 +89,20 @@ Golite/
   recursive form in `app/Http/Kernel.go` makes "don't call `Next()`" a real
   short-circuit, with no separate `Abort()` needed. See
   [middleware.md](middleware.md#how-the-chain-runs--contextnext).
+- **Middleware is an interface (`Handle(c, next, params...)`), not just a
+  function type.** A bare `func(*Context)` can't carry parameters, a
+  `Terminate` method, or constructor-injected fields, so it can't satisfy
+  parameterized (`"role:editor,admin"`), terminable, or DI-friendly
+  middleware. `MiddlewareFunc` adapts a plain closure into the interface
+  for the common stateless case (mirroring `http.HandlerFunc`), while
+  middleware that needs any of the above is a small struct instead. See
+  [middleware.md](middleware.md#the-middleware-contract).
+- **A middleware instance is shared across every concurrent request, so it
+  must never hold per-request state on itself.** `Context.Set`/`Get` exist
+  specifically so a middleware can pass data from `Handle` to its own
+  `Terminate` through the (per-request, goroutine-safe) `Context` instead —
+  see `AuditMiddleware` and
+  [middleware.md](middleware.md#terminable-middleware).
 
 See [bootstrapping.md](bootstrapping.md) for how the pieces are wired
 together at startup, and [request-lifecycle.md](request-lifecycle.md) for

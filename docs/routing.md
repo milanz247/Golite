@@ -161,15 +161,33 @@ group's prefix/name-prefix/middleware are just applied automatically.
 ## Middleware on a route or group
 
 A route can also take middleware directly, in addition to whatever its
-group(s) contributed:
+group(s) contributed — as a single name, several names, a parameterized
+spec, or a `[]string`:
 
 ```go
-kernel.GET("/admin/reports", handler).Middleware("auth", "throttle")
+kernel.GET("/admin/reports", handler).Middleware("auth", "role:editor,admin")
+kernel.GET("/dashboard", handler).Middleware([]string{"web", "auth"})
 ```
 
-Middleware here is referenced **by alias name** (a string), not a direct
-`HandlerFunc` — see [middleware.md](middleware.md#middleware-aliases) for
-how aliases are registered and resolved.
+Middleware here is referenced **by name** (a string, optionally
+`"name:param1,param2"`), not a direct value — see
+[middleware.md](middleware.md#the-three-registries) for how names resolve
+to actual middleware (aliases, groups, or the service container),
+[middleware.md#middleware-parameters](middleware.md#middleware-parameters)
+for how `"role:editor,admin"`-style params reach the middleware, and
+[middleware.md#middleware-priority](middleware.md#middleware-priority) for
+the order they end up running in regardless of how they were assigned.
+
+A route can also opt out of a middleware its group would otherwise
+contribute:
+
+```go
+kernel.Prefix("admin").Middleware("web").Group(func(admin *apphttp.RouteGroup) {
+	admin.GET("/health", handler).WithoutMiddleware("audit")
+})
+```
+
+See [middleware.md#excluding-middleware--withoutmiddleware](middleware.md#excluding-middleware--withoutmiddleware).
 
 ## Redirects
 

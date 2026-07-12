@@ -139,16 +139,33 @@ for anything that can change which route matches, like
 
 ### Add middleware scoped to a route or group
 
-Register a named alias once, then reference it by string wherever needed:
+Register a named alias once, then reference it by string wherever needed —
+plain, parameterized (`"role:editor,admin"`), or as part of a
+`MiddlewareGroup`:
 
 ```go
 kernel.AliasMiddleware("auth", appMiddleware.Authenticate())
+kernel.AliasMiddleware("role", middleware.NewRole())
+kernel.MiddlewareGroup("web", "auth", "audit")
 
 kernel.GET("/account", handler).Middleware("auth")
-kernel.Prefix("admin").Middleware("auth").Group(func(r *apphttp.RouteGroup) { ... })
+kernel.GET("/posts/{p}/edit", handler).Middleware("auth", "role:editor,admin")
+kernel.Middleware("web").Group(func(r *apphttp.RouteGroup) { ... })
 ```
 
-See [middleware.md](middleware.md#middleware-aliases).
+A route inside a group can opt out of one specific middleware the group
+would otherwise contribute:
+
+```go
+admin.GET("/health", handler).WithoutMiddleware("audit")
+```
+
+And execution order is always normalized by `kernel.MiddlewarePriority`,
+regardless of the order middleware was assigned. See
+[middleware.md](middleware.md) for all of the above, plus terminable
+middleware (`Terminate`, for post-response cleanup) and resolving a
+middleware struct straight from the service container via
+`kernel.Container().Bind(...)`.
 
 ### Add a new config value
 

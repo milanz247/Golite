@@ -2,19 +2,50 @@
 
 Files: [`app/Http/Kernel.go`](../app/Http/Kernel.go),
 [`app/Http/Middleware/LoggerMiddleware.go`](../app/Http/Middleware/LoggerMiddleware.go),
-[`app/Http/Middleware/MethodSpoofingMiddleware.go`](../app/Http/Middleware/MethodSpoofingMiddleware.go)
+[`app/Http/Middleware/MethodSpoofingMiddleware.go`](../app/Http/Middleware/MethodSpoofingMiddleware.go),
+[`app/Http/Middleware/RoleMiddleware.go`](../app/Http/Middleware/RoleMiddleware.go),
+[`app/Http/Middleware/AuditMiddleware.go`](../app/Http/Middleware/AuditMiddleware.go)
 
-## Shape of a middleware
+Golite's middleware system mirrors Laravel's in full: three distinct
+registries (global, named/aliased, grouped), middleware parameters
+(`"role:editor,admin"`), a priority order that's enforced regardless of
+assignment order, per-route exclusion (`WithoutMiddleware`), terminable
+middleware, and dependency-injected middleware structs resolved through the
+service container.
 
-A middleware is just a function that returns a `HandlerFunc`:
+## The `Middleware` contract
 
 ```go
-type HandlerFunc func(*Context)
+type Middleware interface {
+	Handle(c *Context, next func(), params ...string)
+}
 ```
 
-There's no separate middleware type — a middleware and a route handler are
-the same shape (`func(*Context)`), which is what makes it possible to build
-a single flat chain out of both.
+This mirrors Laravel's `$middleware->handle($request, $next, ...$params)`
+directly: a middleware receives the request `Context`, a `next` callback
+that continues the pipeline, and any parameters parsed from a
+`"name:param1,param2"` middleware spec. A middleware that wants to
+short-circuit the request (failed auth, a forbidden role, ...) simply never
+calls `next`.
+
+Being an **interface**, not a bare function type, is what lets middleware
+be implemented as a **struct** — which is what makes parameters,
+termination, and dependency injection possible (a closure can't have a
+second method or hold injected fields). For simple, stateless middleware
+that needs neither, `MiddlewareFunc` adapts a plain function — Golite's
+equivalent of the standard library's `http.HandlerFunc`:
+
+```go
+type MiddlewareFunc func(c *Context, next func())
+
+func (f MiddlewareFunc) Handle(c *Context, next func(), _ ...string) {
+	f(c, next)
+}
+```
+
+`HandlerFunc` (`func(*Context)`) is unrelated and unchanged: it's the shape
+of a **controller action** — the terminal handler at the end of the chain,
+which has no `next` to call.
 
 ## How the chain runs — `Context.Next()`
 
@@ -27,194 +58,360 @@ func (c *Context) Next() {
 }
 ```
 
-This is a **recursive** pipeline, not an iterating loop: `Next()` advances
-the index by one and, if there's a handler there, calls it directly —
-once. If that handler calls `c.Next()` itself, execution recurses one level
-deeper; when it returns, control unwinds back through every ancestor call,
-letting each middleware run code both *before* and *after* the rest of the
-chain (classic "onion" middleware).
-
-**Not calling `c.Next()` genuinely stops the chain** — nothing further down
-ever runs, no `Abort()` call needed:
+This is the same recursive "onion" pipeline as before: `Next()` advances
+the index by one and, if there's a `HandlerFunc` there, calls it directly.
+Middleware never appears in `c.handlers` directly, though — each resolved
+`Middleware` is wrapped into a `HandlerFunc` by `toHandler`:
 
 ```go
-func Authenticate() apphttp.HandlerFunc {
-	return func(c *apphttp.Context) {
-		if c.Request.Header.Get("Authorization") == "" {
-			c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return // nothing downstream runs
-		}
-		c.Next()
+func toHandler(mw Middleware, params []string) HandlerFunc {
+	return func(c *Context) {
+		c.executed = append(c.executed, mw)
+		mw.Handle(c, c.Next, params...)
 	}
 }
 ```
 
-This matters and was specifically verified: an earlier iterative
-implementation of `Next()` (the classic Gin-style `for` loop) kept advancing
-to the next handler regardless of whether the current one called `Next()`,
-which meant an "unauthorized" middleware that just returned still let the
-controller run afterward, double-writing the response. The recursive form
-above doesn't have that failure mode.
+Passing `c.Next` (a method value, type `func()`) as the `next` argument is
+what lets a `Middleware.Handle` implementation call `next()` to continue
+the pipeline exactly like `Context.Next()` always worked — the two are the
+same mechanism, just addressed through the new interface. `toHandler` also
+records the middleware into `c.executed`, which is how `Kernel.terminate`
+later finds every middleware that actually ran for this request (see
+[Terminable middleware](#terminable-middleware) below).
 
-Handlers appended to `c.handlers` *while* the chain is running — which is
-exactly what `Kernel.dispatch` does once it resolves a route (see below) —
-are picked up correctly, since each `Next()` call re-checks the current
-`len(c.handlers)`.
+**Not calling `next()` genuinely stops the chain** — nothing further down
+ever runs, no `Abort()` call needed. This was specifically verified: an
+earlier iterative implementation of `Next()` kept advancing to the next
+handler regardless of whether the current one called `Next()`, which meant
+an "unauthorized" middleware that just returned still let the controller
+run afterward, double-writing the response. The recursive form doesn't
+have that failure mode.
 
-## `LoggerMiddleware`
+## The three registries
+
+Mirroring Laravel's `app/Http/Kernel.php` almost field-for-field:
 
 ```go
-func Logger() apphttp.HandlerFunc {
-	return func(c *apphttp.Context) {
-		start := time.Now()
-		method := c.Request.Method
-		path := c.Request.URL.Path
+type Kernel struct {
+	// GlobalMiddleware runs on every request, in registration order, before
+	// routing is resolved — Laravel's $middleware.
+	GlobalMiddleware []Middleware
 
-		c.Next()
+	// RouteMiddleware maps a short alias (e.g. "auth") to the middleware
+	// that implements it — Laravel's $routeMiddleware.
+	RouteMiddleware map[string]Middleware
 
-		log.Printf("%s %s completed in %s", method, path, time.Since(start))
-	}
+	// MiddlewareGroups maps a group name (e.g. "web") to an ordered list of
+	// other middleware names — Laravel's $middlewareGroups.
+	MiddlewareGroups map[string][]string
+
+	// MiddlewarePriority defines the order non-global middleware run in,
+	// regardless of assignment order — Laravel's $middlewarePriority.
+	MiddlewarePriority []string
+	// ...
 }
 ```
 
-`Logger()` is a **factory** — it returns the actual `HandlerFunc`, so
-middleware can take configuration as constructor arguments without changing
-the `HandlerFunc` signature. It calls `c.Next()` to run everything
-downstream, then logs the elapsed time *after* `Next()` returns — i.e.
-after the whole rest of the chain (remaining global middleware, routing,
-route-specific middleware, and the controller) has finished.
+These are exported fields (so they can be configured declaratively, as in
+Laravel's `Kernel.php`), but should be treated as boot-time configuration —
+set them via the constructor/helper methods below (which take a write lock)
+before the server starts serving; reads during dispatch always go through a
+lock-protected snapshot.
 
-## `MethodSpoofingMiddleware`
+### Global middleware
 
 ```go
-func MethodSpoofing() apphttp.HandlerFunc {
-	return func(c *apphttp.Context) {
-		if c.Request.Method == http.MethodPost {
-			if override := resolveOverride(c.Request); spoofableMethods[override] {
-				c.Request.Method = override
-			}
-		}
-		c.Next()
-	}
-}
+func (k *Kernel) UseMiddleware(middleware ...Middleware)
 ```
-
-HTML forms only support `GET` and `POST`. `MethodSpoofing` lets a `POST`
-request simulate `PUT`, `PATCH`, or `DELETE` by checking, in order:
-
-1. an `X-HTTP-Method-Override` header, or
-2. a hidden `_method` form field (read via `r.PostFormValue("_method")`,
-   which parses the body as a form as needed and leaves non-form bodies —
-   e.g. JSON — untouched).
-
-If either names `PUT`, `PATCH`, or `DELETE`, it overwrites
-`c.Request.Method` before calling `c.Next()`.
-
-**This must run as global middleware, and before routing** — which is
-exactly what registering it via `Kernel.UseMiddleware` guarantees (see
-[request-lifecycle.md](request-lifecycle.md)): `Kernel.ServeHTTP` always
-appends its own routing dispatch as the *last* handler in the chain, after
-every global middleware, so by the time a route is matched, `Request.Method`
-already reflects any override. Registered in
-[`public/main.go`](../public/main.go):
 
 ```go
 app.Kernel.UseMiddleware(appMiddleware.MethodSpoofing(), appMiddleware.Logger())
 ```
 
-(Spoofing is registered before `Logger` so the logged method reflects the
-overridden verb, not the original `POST`.)
+Runs on **every** request — matched route, 405, fallback, or plain 404 —
+because `Kernel.ServeHTTP` always builds the initial chain as
+`[...GlobalMiddleware, k.dispatch]`, and `dispatch` is what actually
+resolves routing. Global middleware order is never touched by
+`MiddlewarePriority` — only route-resolved middleware gets sorted (see
+below).
 
-## Registering global middleware
-
-```go
-func (k *Kernel) UseMiddleware(middleware ...HandlerFunc) {
-	k.mu.Lock()
-	k.globalMiddleware = append(k.globalMiddleware, middleware...)
-	k.mu.Unlock()
-}
-```
-
-`UseMiddleware` is variadic and thread-safe. Every registered global
-middleware runs on **every** request — matched route, 405, fallback, or
-plain 404 — because `Kernel.ServeHTTP` always builds the chain as
-`[...globalMiddleware, k.dispatch]`, and `dispatch` is what actually
-resolves routing (see [request-lifecycle.md](request-lifecycle.md)).
-
-## Middleware aliases
-
-Route- and group-level middleware (`Route::middleware("auth")` in Laravel)
-are referenced **by string name**, not by a direct `HandlerFunc` value.
-Golite resolves those names against a small alias registry on the kernel:
+### Route middleware (aliases)
 
 ```go
-func (k *Kernel) AliasMiddleware(name string, mw HandlerFunc)
+func (k *Kernel) AliasMiddleware(name string, mw Middleware)
 ```
 
 ```go
-kernel.AliasMiddleware("auth", func(c *apphttp.Context) {
+kernel.AliasMiddleware("auth", apphttp.MiddlewareFunc(func(c *apphttp.Context, next func()) {
 	if c.Request.Header.Get("Authorization") == "" {
 		c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	c.Next()
-})
+	next()
+}))
 
-kernel.Prefix("admin").Middleware("auth").Group(func(admin *apphttp.RouteGroup) {
-	admin.GET("/users", handler) // runs the "auth" alias before handler
+kernel.GET("/account", handler).Middleware("auth")
+```
+
+`RouteDefinition.Middleware(names ...any)` and `RouteGroup.Middleware(names
+...any)` accept a single name (`"auth"`), several (`"auth",
+"role:editor,admin"`), or one `[]string{"web", "auth"}` — `flattenMiddlewareNames`
+normalizes whichever form is used. They just record the raw spec strings;
+resolution happens per-request in `Kernel.dispatch`, via
+`Kernel.resolveRouteMiddleware`.
+
+### Middleware groups
+
+```go
+func (k *Kernel) MiddlewareGroup(name string, members ...any)
+```
+
+```go
+kernel.MiddlewareGroup("web", "auth", "audit")
+
+kernel.Middleware("web").Group(func(g *apphttp.RouteGroup) {
+	g.GET("/dashboard", handler) // expands to auth, then audit
 })
 ```
 
-`RouteGroup.Middleware(names ...string)` and
-`RouteDefinition.Middleware(names ...string)` both just accumulate alias
-names; resolution to actual `HandlerFunc`s happens per-request in
-`Kernel.dispatch`, via `Kernel.resolveMiddleware`, which looks each name up
-in `middlewareAliases` under a read lock. An alias that was never
-registered is silently skipped — there's no ordering requirement between
-`AliasMiddleware` and the routes that reference it, since resolution is
-deferred to request time rather than done at route-registration time.
+Referencing a group name in `.Middleware(...)` expands to its members —
+recursively, if a member is itself a group name, with cycle protection —
+via `Kernel.expandMiddlewareNames`.
 
-Route-specific middleware runs *after* whatever its enclosing group(s)
-already contributed (group middleware is copied into the route's
-`middlewareNames` at creation; `.Middleware()` on the route appends more),
-and always after every *global* middleware, since it only enters the chain
-once `dispatch` has already matched a route.
+### Dependency injection through the service container
+
+```go
+func (k *Kernel) Container() *container.Container
+```
+
+`Kernel.lookupMiddleware` checks `RouteMiddleware` first; if the name isn't
+there, it falls back to `k.Container().Make(name)`, type-asserted to
+`Middleware`. That means a middleware struct — built with whatever
+constructor-injected dependencies it needs — can be registered **directly
+through the container** instead of (or in addition to) `AliasMiddleware`:
+
+```go
+kernel.Container().Bind("audit", middleware.NewAudit())
+
+kernel.GET("/admin/users", handler).Middleware("audit") // resolved from the container
+```
+
+This is the same container every controller already resolves services
+from via `Context.App` — see [service-container.md](service-container.md).
+
+## Middleware parameters
+
+```go
+func ParseMiddlewareSpec(spec string) (name string, params []string)
+```
+
+A middleware string is split on the *first* `:` into a base name and a
+comma-separated parameter list — `"role:editor,admin"` → name `"role"`,
+params `["editor", "admin"]`. `Kernel.resolveRouteMiddleware` parses every
+spec this way before resolving the base name and calling
+`mw.Handle(c, next, params...)`.
+
+```go
+// app/Http/Middleware/RoleMiddleware.go
+type Role struct{}
+
+func NewRole() *Role { return &Role{} }
+
+func (m *Role) Handle(c *apphttp.Context, next func(), params ...string) {
+	userRole := c.Request.Header.Get("X-User-Role")
+	for _, allowed := range params {
+		if strings.EqualFold(strings.TrimSpace(allowed), userRole) {
+			next()
+			return
+		}
+	}
+	c.JSON(http.StatusForbidden, map[string]string{
+		"error": "forbidden: requires role " + strings.Join(params, " or "),
+	})
+}
+```
+
+```go
+kernel.GET("/posts/{post}/edit", handler).Middleware("auth", "role:editor,admin")
+```
+
+## Excluding middleware — `WithoutMiddleware`
+
+```go
+func (r *RouteDefinition) WithoutMiddleware(names ...any) *RouteDefinition
+```
+
+```go
+kernel.Prefix("admin").Middleware("web").Group(func(admin *apphttp.RouteGroup) {
+	// "web" pulls in auth + audit for every route in this group...
+	admin.GET("/health", handler).WithoutMiddleware("audit") // ...except this one
+})
+```
+
+Exclusion is by **base name**, checked after group expansion but before
+resolution: `Kernel.resolveRouteMiddleware` expands the route's (and its
+group's) middleware specs through `MiddlewareGroups` first, *then* drops
+any whose base name is in the route's `WithoutMiddleware` set — so it
+correctly reaches into and removes a specific group-contributed middleware,
+not just ones added directly on the route.
+
+## Middleware priority
+
+```go
+MiddlewarePriority []string
+```
+
+```go
+kernel.MiddlewarePriority = []string{"auth", "role", "audit"}
+```
+
+After expansion and exclusion, `Kernel.resolveRouteMiddleware` stable-sorts
+the remaining middleware by this list — entries whose base name appears in
+`MiddlewarePriority` are ordered by that list's index; anything not listed
+runs after every listed entry, in its original relative order. This is
+**independent of how the middleware was assigned** — written directly on
+the route, pulled in via a group, in any order — which was verified
+directly: registering `"third"`, `"second"`, `"first"` as aliases (in that
+order) and assigning them on a route as `.Middleware("third", "first",
+"second")`, with `MiddlewarePriority = []string{"first", "second",
+"third"}`, still executes `first → second → third → handler`.
+
+Only **route-resolved** middleware is sorted this way; `GlobalMiddleware`
+always runs in registration order (see above).
+
+## Terminable middleware
+
+```go
+type TerminableMiddleware interface {
+	Terminate(c *Context)
+}
+```
+
+```go
+func (k *Kernel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// ...build chain, run it...
+	ctx.Next()
+
+	k.terminate(ctx)
+}
+
+func (k *Kernel) terminate(c *Context) {
+	for _, mw := range c.executed {
+		if t, ok := mw.(TerminableMiddleware); ok {
+			t.Terminate(c)
+		}
+	}
+}
+```
+
+Once the entire middleware/handler chain has returned — meaning every
+write to the response has already happened — the kernel loops over
+`c.executed` (populated by `toHandler` as each middleware actually started
+running; a middleware short-circuited *before* it runs never appears here)
+and calls `Terminate` on any that implement it, in the order they executed.
+This mirrors Laravel's `Kernel::terminate()`, called right after
+`$response->send()` in `public/index.php`.
+
+**A middleware instance is shared across every concurrent request** (one
+`*Audit` handles all traffic), so it must never store per-request state on
+itself — that's a data race. `Context.Set`/`Context.Get` exist specifically
+to pass state from `Handle` to `Terminate` through the (per-request,
+goroutine-safe) `Context` instead:
+
+```go
+// app/Http/Middleware/AuditMiddleware.go
+type Audit struct{}
+
+func NewAudit() *Audit { return &Audit{} }
+
+func (m *Audit) Handle(c *apphttp.Context, next func(), _ ...string) {
+	c.Set("audit.start", time.Now())
+	next()
+}
+
+func (m *Audit) Terminate(c *apphttp.Context) {
+	start, ok := c.Get("audit.start")
+	if !ok {
+		return
+	}
+	log.Printf("[audit] %s %s finished in %s", c.Request.Method, c.Request.URL.Path, time.Since(start.(time.Time)))
+}
+```
+
+## `LoggerMiddleware` and `MethodSpoofingMiddleware`
+
+Both are global, stateless middleware adapted via `MiddlewareFunc`:
+
+```go
+// "after" style: runs code both before and after next()
+func Logger() apphttp.Middleware {
+	return apphttp.MiddlewareFunc(func(c *apphttp.Context, next func()) {
+		start := time.Now()
+		method, path := c.Request.Method, c.Request.URL.Path
+		next()
+		log.Printf("%s %s completed in %s", method, path, time.Since(start))
+	})
+}
+
+// "before" style: all its work happens ahead of next(), nothing after
+func MethodSpoofing() apphttp.Middleware {
+	return apphttp.MiddlewareFunc(func(c *apphttp.Context, next func()) {
+		if c.Request.Method == http.MethodPost {
+			if override := resolveOverride(c.Request); spoofableMethods[override] {
+				c.Request.Method = override
+			}
+		}
+		next()
+	})
+}
+```
+
+`MethodSpoofing` must run as **global** middleware, and before routing —
+which registering it via `Kernel.UseMiddleware` guarantees, since
+`Kernel.ServeHTTP` always appends its routing `dispatch` as the *last*
+handler in the chain, after every global middleware. By the time a route
+is matched, `Request.Method` already reflects any override. See
+[request-lifecycle.md](request-lifecycle.md).
 
 ## Writing your own middleware
 
-1. Add a new file under `app/Http/Middleware/`, e.g. `AuthMiddleware.go`.
-2. Follow the factory pattern used by `Logger`/`MethodSpoofing`:
+For **stateless** middleware with no parameters, adapt a closure:
 
-   ```go
-   package middleware
+```go
+func Authenticate() apphttp.Middleware {
+	return apphttp.MiddlewareFunc(func(c *apphttp.Context, next func()) {
+		if c.Request.Header.Get("Authorization") == "" {
+			c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next()
+	})
+}
+```
 
-   import (
-       "net/http"
+For **parameterized or terminable** middleware (or one that needs injected
+dependencies), define a struct:
 
-       apphttp "Golite/app/Http"
-   )
+```go
+type Throttle struct{ limiter *rate.Limiter } // example dependency
 
-   func Authenticate() apphttp.HandlerFunc {
-       return func(c *apphttp.Context) {
-           if c.Request.Header.Get("Authorization") == "" {
-               c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-               return // not calling c.Next() stops the chain here
-           }
-           c.Next()
-       }
-   }
-   ```
+func NewThrottle(limiter *rate.Limiter) *Throttle {
+	return &Throttle{limiter: limiter}
+}
 
-3. Register it either **globally** (runs on every request, before routing):
+func (m *Throttle) Handle(c *apphttp.Context, next func(), params ...string) {
+	if !m.limiter.Allow() {
+		c.JSON(http.StatusTooManyRequests, map[string]string{"error": "rate limited"})
+		return
+	}
+	next()
+}
+```
 
-   ```go
-   app.Kernel.UseMiddleware(appMiddleware.Logger(), appMiddleware.Authenticate())
-   ```
+Then register it either:
 
-   or as a **named alias** for use on specific routes/groups:
-
-   ```go
-   app.Kernel.AliasMiddleware("auth", appMiddleware.Authenticate())
-   // then, in routes/web.go:
-   kernel.Prefix("admin").Middleware("auth").Group(func(r *apphttp.RouteGroup) { ... })
-   ```
+- **globally** — `app.Kernel.UseMiddleware(appMiddleware.Logger(), NewThrottle(limiter))`
+- as a **named alias** — `kernel.AliasMiddleware("throttle", NewThrottle(limiter))`, then `.Middleware("throttle")`
+- **through the container** — `kernel.Container().Bind("throttle", NewThrottle(limiter))`, then `.Middleware("throttle")`
+- as a **group member** — `kernel.MiddlewareGroup("api", "throttle", "auth")`

@@ -18,9 +18,16 @@ structs and interfaces instead of reflection-based magic.
   named routes with URL generation, nested route groups (prefix +
   middleware + name prefix), redirects, a fallback route, and proper
   404/405 handling
-- Named middleware aliases plus `LoggerMiddleware` and
-  `MethodSpoofingMiddleware` (PUT/PATCH/DELETE via `_method` or
-  `X-HTTP-Method-Override`, for plain HTML forms)
+- A Laravel-standard middleware system: global, named/aliased, and grouped
+  middleware registries, a `MiddlewarePriority` order enforced regardless of
+  assignment order, parameterized middleware (`"role:editor,admin"`),
+  per-route exclusion (`WithoutMiddleware`), terminable middleware
+  (post-response cleanup via `Terminate`), and middleware structs resolvable
+  straight from the service container for dependency injection
+- `LoggerMiddleware`, `MethodSpoofingMiddleware` (PUT/PATCH/DELETE via
+  `_method` or `X-HTTP-Method-Override`, for plain HTML forms),
+  `RoleMiddleware` (parameterized), and `AuditMiddleware` (terminable) as
+  worked examples
 
 ## Requirements
 
@@ -66,8 +73,8 @@ Golite/
 ├── app/
 │   ├── Providers/     # Service providers (Register/Boot)
 │   └── Http/
-│       ├── Kernel.go          # Regex router, groups, named routes, middleware pipeline (http.Handler)
-│       ├── Middleware/        # Global + aliasable middleware (Logger, MethodSpoofing)
+│       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
+│       ├── Middleware/        # Global, aliased, grouped, parameterized & terminable middleware
 │       └── Controllers/       # Route handlers
 ├── routes/           # Route definitions (routes/web.go)
 ├── docs/             # Full documentation (start at docs/README.md)
