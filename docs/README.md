@@ -10,5 +10,6 @@
 - [CSRF Protection](security-csrf.md) — the session mechanism, `Context.CsrfToken()`, `VerifyCsrfToken`, wildcard exclusions, the `XSRF-TOKEN` cookie
 - [HTTP Request Handling](http-requests.md) — request inspection helpers, the unified input payload, encrypted cookies, flash/old input, file uploads, `TrimStrings`/`ConvertEmptyStringsToNull`/`TrustProxies`/`TrustHosts`
 - [Controllers & Resource Routing](controllers.md) — the base `Controller`, constructor DI, invokable controllers, `Route::resource`/`apiResource`, nested + shallow resources, singleton resources
+- [HTTP Response Handling](responses.md) — dynamic return-type serialization, the fluent `Response` factory, redirects with flash data, `Json`/`View`/`Download`/`File`/`StreamDownload`, response macros
 - [Configuration](configuration.md) — `.env`, `config.LoadConfig()`, adding new config values
 - [Developer Guide](developer-guide.md) — practical how-tos: running the app, adding routes/services/providers/middleware, known limitations

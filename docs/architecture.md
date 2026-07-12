@@ -26,6 +26,7 @@ Golite/
 │   └── Http/
 │       ├── Kernel.go                 # Kernel, Middleware, RouteDefinition, RouteGroup — the router
 │       ├── Resource.go               # Route::resource/apiResource/singleton, Invokable, ControllerMiddleware
+│       ├── Response.go               # Response factory, Responder/auto-conversion, macros, view rendering
 │       ├── Context.go                # Context struct + methods (JSON, Redirect, Session, CsrfToken, files, ...)
 │       ├── Input.go                  # Unified input payload: All/Input/Query/Has/Only/Except/Boolean/Merge
 │       ├── Cookie.go                 # AES-256-GCM cookie encryption primitives
@@ -50,6 +51,9 @@ Golite/
 │           └── ProvisionServerController.go     # Invokable (single-action) controller demo
 ├── routes/
 │   └── web.go                    # MapWebRoutes: registers paths onto the kernel
+├── resources/
+│   └── views/
+│       └── welcome.html          # Sample html/template for Response.View
 └── public/
     └── main.go                   # Entry point / front controller
 ```
@@ -64,8 +68,10 @@ Golite/
 | `app/Providers/*ServiceProvider.go`       | `app/Providers/*ServiceProvider.php`         |
 | `app/Http/Kernel.go` (`Kernel`)           | `app/Http/Kernel.php`                        |
 | `app/Http/Resource.go`                    | `Illuminate\Routing\ResourceRegistrar` / `PendingResourceRegistration` |
+| `app/Http/Response.go` (`Response`)       | `Illuminate\Http\Response` / `RedirectResponse` |
 | `app/Http/Context.go` (`Context`)         | `Illuminate\Http\Request` + response helpers |
 | `app/Http/Session.go`                     | `Illuminate\Session\Store` + a driver        |
+| `resources/views/*.html`                  | `resources/views/*.blade.php`                |
 | `app/Http/Middleware/*.go`                | `app/Http/Middleware/*.php`                  |
 | `app/Http/Controllers/Controller.go`      | `Illuminate\Routing\Controller`              |
 | `app/Http/Controllers/*.go`               | `app/Http/Controllers/*.php`                 |
@@ -173,6 +179,29 @@ Golite/
   rebuild from scratch. Verified directly that chaining `Only` then
   `Except` replaces rather than compounds the restriction. See
   [controllers.md](controllers.md#how-onlyexceptshallowcreatable-avoid-leaking-stale-routes).
+- **`ResponderFunc` is a separate type from `HandlerFunc`, not a change to
+  it.** Requirement was that handlers can *optionally* return a value;
+  Go can't make a single function type's return "optional," and changing
+  `HandlerFunc` itself would have forced every existing controller and
+  route closure (dozens of call sites) to add a bare `return nil`. Wrapping
+  a `ResponderFunc` with `Responder` opts in per-route instead, so nothing
+  written before this turn needed to change. See
+  [responses.md](responses.md#dynamic-return-type-serialization).
+- **`Response.Send` is exported, not called only from inside the
+  package.** A `*Response` can be delivered two ways: returned from a
+  `Responder`-wrapped handler (auto-sent), or built and sent explicitly
+  from a plain `HandlerFunc` via `.Send(c)` — see `/contact`'s
+  validation-failure branch. Keeping `Send` public gives both paths full
+  support rather than forcing every fluent-response route through
+  `Responder`.
+- **`NewResponse`, not `Response`, is the package-level constructor.**
+  Same constraint as `RouteDefinition`/`Route`: Go doesn't allow a
+  function and a type to share an identifier in the same package, and the
+  *type* needs to stay named `Response` (referenced everywhere as
+  `*Response`). A macro registered from `AppServiceProvider` — which has
+  no `*Context` to call `Context.Response` on — is what actually needs the
+  package-level form. See
+  [responses.md](responses.md#response-macros).
 
 See [bootstrapping.md](bootstrapping.md) for how the pieces are wired
 together at startup, and [request-lifecycle.md](request-lifecycle.md) for

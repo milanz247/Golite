@@ -51,6 +51,15 @@ structs and interfaces instead of reflection-based magic.
   `singleton` — reflection-based (a controller need only implement the
   actions it has), with nested (`"photos.comments"`) and `.Shallow()`
   routing, and `.Only(...)`/`.Except(...)` filtering
+- A Laravel-standard response layer: handlers can optionally return a
+  value (`apphttp.Responder`) instead of writing the response themselves —
+  a string auto-sends as `text/html`, a struct/map/slice as JSON — and a
+  fluent `*Response` factory (`c.Response(...)`) covers
+  `Status`/`Header`/`WithHeaders`/`Cookie`/`WithoutCookie`, forced `Json`,
+  `View` (Go `html/template`, cached), `Download`/`File`/`StreamDownload`,
+  redirects (`Redirect`/`Back`/`Away`) with one-shot flash data
+  (`With`/`WithInput`), and a global macro registry
+  (`ResponseFactory.Macro(...)`) for reusable custom responses
 
 ## Requirements
 
@@ -98,6 +107,7 @@ Golite/
 │   └── Http/
 │       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
 │       ├── Resource.go        # Route::resource/apiResource/singleton, Invokable controllers
+│       ├── Response.go        # Response factory, Responder/auto-conversion, macros, view rendering
 │       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken, cookies, files
 │       ├── Input.go           # Unified input payload (query + JSON/form body)
 │       ├── Cookie.go          # AES-256-GCM cookie encryption
@@ -106,6 +116,7 @@ Golite/
 │       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, CSRF & normalization middleware
 │       └── Controllers/       # Base Controller + route handlers (resource, nested, singleton, invokable demos)
 ├── routes/           # Route definitions (routes/web.go)
+├── resources/views/  # html/template files for Response.View
 ├── docs/             # Full documentation (start at docs/README.md)
 └── public/           # Entry point (public/main.go)
 ```
@@ -115,7 +126,8 @@ Golite/
 Full framework documentation — architecture, the bootstrapping process, the
 request lifecycle, the service container, providers, routing, middleware,
 CSRF protection, HTTP request handling, controllers & resource routing,
-configuration, and a developer guide — lives in [`docs/`](docs/README.md).
+response handling, configuration, and a developer guide — lives in
+[`docs/`](docs/README.md).
 
 ## Building and testing
 

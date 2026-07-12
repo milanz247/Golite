@@ -172,8 +172,10 @@ The classic use is repopulating a form after a validation failure:
 ```go
 kernel.POST("/contact", func(c *apphttp.Context) {
 	if !c.Has("email") {
-		c.Flash()
-		c.Redirect(http.StatusFound, "/contact")
+		// .WithInput() does the same thing c.Flash() + c.Redirect() used to
+		// do as two steps — see docs/responses.md for the fluent Response
+		// factory this now goes through.
+		c.Redirect("/contact", http.StatusFound).WithInput().Send(c)
 		return
 	}
 	// ...

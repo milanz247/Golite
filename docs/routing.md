@@ -197,8 +197,10 @@ kernel.Redirect("/home", "/user", http.StatusFound)
 
 Equivalent to `Route::redirect($from, $to, $status)`. Internally this is
 just `addRoute(allMethods, from, handler)` where `handler` calls
-`Context.Redirect`, so it responds to every common HTTP method, and the
-status defaults to `302 Found` (`http.StatusFound`) if `0` is passed.
+`c.Redirect(to, status).Send(c)` (see [responses.md](responses.md) for the
+fluent `*Response` this builds and sends), so it responds to every common
+HTTP method, and the status defaults to `302 Found` (`http.StatusFound`)
+if `0` is passed.
 
 ## Fallback route
 

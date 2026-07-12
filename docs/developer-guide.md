@@ -8,7 +8,7 @@ conceptual background behind each of these, see:
 [service-providers.md](service-providers.md), [routing.md](routing.md),
 [middleware.md](middleware.md), [security-csrf.md](security-csrf.md),
 [http-requests.md](http-requests.md), [controllers.md](controllers.md),
-[configuration.md](configuration.md).
+[responses.md](responses.md), [configuration.md](configuration.md).
 
 ## Requirements
 
@@ -251,6 +251,42 @@ redirect, `UploadedFile`'s `Extension`/`Store`/`StoreAs`) and the global
 `TrimStrings`/`ConvertEmptyStringsToNull`/`TrustProxies`/`TrustHosts`
 middleware that normalize and secure that input before a handler sees it.
 
+### Return a value from a handler instead of writing the response
+
+Wrap the handler in `apphttp.Responder` and return whatever you want sent
+— a string, a struct/map/slice (JSON), or a `*Response`:
+
+```go
+kernel.GET("/status", apphttp.Responder(func(c *apphttp.Context) any {
+    return map[string]string{"status": "ok"} // -> application/json, 200
+}))
+```
+
+The fluent factory covers everything else — headers, cookies, redirects
+with flash data, forced JSON, rendered views, downloads, and streaming:
+
+```go
+kernel.GET("/report", apphttp.Responder(func(c *apphttp.Context) any {
+    return c.Response(nil).
+        Header("X-Report-Version", "2").
+        StreamDownload(func(w io.Writer) {
+            fmt.Fprintln(w, "generated on the fly, no temp file")
+        }, "report.txt")
+}))
+
+kernel.POST("/posts", func(c *apphttp.Context) {
+    if !c.Has("title") {
+        c.Redirect("/posts/create", http.StatusFound).WithInput().With("error", "Title is required").Send(c)
+        return
+    }
+    // ...
+})
+```
+
+See [responses.md](responses.md) for the full API, including `View` (Go
+`html/template` from `resources/views/`) and registering a custom
+response macro via `apphttp.ResponseFactory.Macro(...)`.
+
 ## Known limitations / extension points
 
 - **Optional parameters must trail the route.** `/a/{b?}/{c}` (required
@@ -279,6 +315,14 @@ middleware that normalize and secure that input before a handler sees it.
   singleton resources don't support dot-notation nesting. Both are
   reasonable, documented scope cuts — see
   [controllers.md](controllers.md#singularize-a-deliberately-simple-heuristic).
+- **Rendered views (`Response.View`) are parsed once and cached, with no
+  invalidation** — edit a template, restart the server. Same tradeoff as
+  sessions and the cookie key. See
+  [responses.md](responses.md#specialized-response-formats).
+- **`.Status(code)` has no effect on `Download`/`File` responses** — the
+  standard library's `http.ServeFile` decides the final status itself
+  (200, 304, 416, ...). Headers set via `.Header()`/`.WithHeaders()` still
+  apply. See [responses.md](responses.md#specialized-response-formats).
 
 ## Import path / package naming gotcha
 
