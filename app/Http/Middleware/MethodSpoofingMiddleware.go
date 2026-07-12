@@ -19,7 +19,9 @@ var spoofableMethods = map[string]bool{
 // simulate PUT, PATCH, and DELETE requests. It inspects incoming POST
 // requests for either an "X-HTTP-Method-Override" header or a hidden
 // "_method" form field and, if it names PUT, PATCH, or DELETE, rewrites
-// Request.Method before continuing down the chain.
+// Request.Method before continuing down the chain. It's a "before" style
+// middleware: all of its work happens ahead of next(), with nothing to do
+// once the rest of the chain returns.
 //
 // This must be registered as *global* middleware via Kernel.UseMiddleware,
 // and it must run before routing is resolved — which Kernel.ServeHTTP
@@ -28,15 +30,15 @@ var spoofableMethods = map[string]bool{
 // spoofed method actually change which route matches, exactly like
 // Laravel's method spoofing running in the global middleware stack ahead of
 // the router.
-func MethodSpoofing() apphttp.HandlerFunc {
-	return func(c *apphttp.Context) {
+func MethodSpoofing() apphttp.Middleware {
+	return apphttp.MiddlewareFunc(func(c *apphttp.Context, next func()) {
 		if c.Request.Method == http.MethodPost {
 			if override := resolveOverride(c.Request); spoofableMethods[override] {
 				c.Request.Method = override
 			}
 		}
-		c.Next()
-	}
+		next()
+	})
 }
 
 func resolveOverride(r *http.Request) string {

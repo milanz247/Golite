@@ -5,20 +5,66 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
 	"Golite/container"
 )
 
-// HandlerFunc is Golite's request handler signature, analogous to Laravel's
-// Closure-based route actions and middleware.
+// HandlerFunc is Golite's terminal request-handler signature — what a
+// controller action looks like. Unlike Middleware (below), a HandlerFunc
+// has no "next" to call; it's the end of the pipeline.
 type HandlerFunc func(*Context)
+
+// ---------------------------------------------------------------------------
+// Middleware: Golite's middleware contract, mirroring Laravel's
+// $middleware->handle($request, $next, ...$params).
+// ---------------------------------------------------------------------------
+
+// Middleware is Golite's middleware contract. Handle receives the request
+// Context, a next callback that continues the pipeline, and any parameters
+// parsed from a "name:param1,param2" middleware string (see
+// ParseMiddlewareSpec). A middleware that wants to short-circuit the
+// request simply never calls next.
+//
+// Implementing Middleware as a struct (rather than a bare closure) is what
+// lets a middleware take constructor-injected dependencies resolved from
+// the service container — see Kernel.Container and
+// docs/middleware.md#dependency-injection.
+type Middleware interface {
+	Handle(c *Context, next func(), params ...string)
+}
+
+// MiddlewareFunc adapts a plain function into a Middleware, for stateless
+// middleware that needs neither parameters nor termination logic —
+// Golite's equivalent of the standard library's http.HandlerFunc adapter.
+type MiddlewareFunc func(c *Context, next func())
+
+// Handle implements Middleware by calling f, ignoring any parameters.
+func (f MiddlewareFunc) Handle(c *Context, next func(), _ ...string) {
+	f(c, next)
+}
+
+// TerminableMiddleware is implemented by middleware that needs to run logic
+// after the response has been fully written to the client — post-response
+// cleanup, background/audit logging, and the like — mirroring Laravel's
+// TerminableMiddleware::terminate(). The Kernel calls Terminate, in
+// execution order, on every middleware from the current request that
+// implements this interface, once the whole handler chain has returned.
+type TerminableMiddleware interface {
+	Terminate(c *Context)
+}
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
 
 // Context wraps the request/response pair together with the application's
 // service container (Laravel's Application itself extends Container, so
 // resolving services through App mirrors Laravel's `app()->make(...)`),
-// the resolved route parameters, and a middleware/handler pipeline.
+// the resolved route parameters, a middleware/handler pipeline, and a
+// small per-request key/value store.
 type Context struct {
 	Writer  http.ResponseWriter
 	Request *http.Request
@@ -27,6 +73,9 @@ type Context struct {
 	handlers []HandlerFunc
 	index    int
 	params   map[string]string
+
+	store    map[string]any
+	executed []Middleware
 }
 
 func newContext(w http.ResponseWriter, r *http.Request, app *container.Container, handlers []HandlerFunc) *Context {
@@ -77,6 +126,24 @@ func (c *Context) Params() map[string]string {
 	return out
 }
 
+// Set stores an arbitrary value on the request, keyed by name. Its main
+// purpose is letting a middleware pass data from Handle to its own
+// Terminate — a middleware instance is shared across every concurrent
+// request, so it must never store per-request state on itself; Context is
+// the per-request, goroutine-safe place for that instead.
+func (c *Context) Set(key string, value any) {
+	if c.store == nil {
+		c.store = make(map[string]any)
+	}
+	c.store[key] = value
+}
+
+// Get retrieves a value previously stored with Set.
+func (c *Context) Get(key string) (any, bool) {
+	v, ok := c.store[key]
+	return v, ok
+}
+
 // JSON writes a JSON response with the given status code.
 func (c *Context) JSON(status int, payload any) {
 	c.Writer.Header().Set("Content-Type", "application/json")
@@ -88,6 +155,43 @@ func (c *Context) JSON(status int, payload any) {
 // Kernel.Redirect (Route::redirect).
 func (c *Context) Redirect(status int, url string) {
 	http.Redirect(c.Writer, c.Request, url, status)
+}
+
+// ---------------------------------------------------------------------------
+// Middleware spec parsing and name normalization shared by RouteDefinition,
+// RouteGroup, and Kernel.
+// ---------------------------------------------------------------------------
+
+// ParseMiddlewareSpec splits a middleware string of the form
+// "name:param1,param2" into its base name and parameter list, mirroring
+// Laravel's parsing of "role:editor,admin" into ["editor", "admin"]. A spec
+// with no ":" has no parameters.
+func ParseMiddlewareSpec(spec string) (name string, params []string) {
+	name, rest, hasParams := strings.Cut(spec, ":")
+	if !hasParams || rest == "" {
+		return name, nil
+	}
+	return name, strings.Split(rest, ",")
+}
+
+// flattenMiddlewareNames normalizes the two calling conventions every
+// Middleware(...)/WithoutMiddleware(...) method accepts — a bare string
+// ("auth"), several strings ("auth", "role:editor"), or a single []string
+// ([]string{"web", "auth"}) — into one flat list, so callers can use
+// whichever reads best at the call site.
+func flattenMiddlewareNames(args []any) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		switch v := a.(type) {
+		case string:
+			out = append(out, v)
+		case []string:
+			out = append(out, v...)
+		default:
+			panic(fmt.Sprintf("golite: middleware name must be a string or []string, got %T", a))
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -106,8 +210,9 @@ type routeSegment struct {
 }
 
 // RouteDefinition represents one registered route. Every fluent method
-// (Where/WhereNumber/.../Name/Middleware/Defaults) mutates the route in
-// place and returns it, mirroring the Illuminate\Routing\Route builder.
+// (Where/WhereNumber/.../Name/Middleware/WithoutMiddleware/Defaults) mutates
+// the route in place and returns it, mirroring the
+// Illuminate\Routing\Route builder.
 type RouteDefinition struct {
 	kernel  *Kernel
 	methods []string // immutable after creation
@@ -122,7 +227,8 @@ type RouteDefinition struct {
 	name            string
 	wheres          map[string]string // param name -> regex constraint
 	defaults        map[string]string // param name -> fallback value
-	middlewareNames []string          // group middleware (at creation) + per-route middleware
+	middlewareNames []string          // group middleware (at creation) + per-route middleware, as raw specs
+	withoutNames    map[string]bool   // base middleware names excluded for this route specifically
 	regex           *regexp.Regexp
 }
 
@@ -289,12 +395,35 @@ func (r *RouteDefinition) Name(name string) *RouteDefinition {
 	return r
 }
 
-// Middleware appends middleware (referenced by alias name, see
-// Kernel.AliasMiddleware) to this specific route, in addition to whatever
-// middleware its enclosing group(s) already contributed.
-func (r *RouteDefinition) Middleware(names ...string) *RouteDefinition {
+// Middleware attaches middleware to this specific route, in addition to
+// whatever middleware its enclosing group(s) already contributed. Each
+// argument is either a single name ("auth"), a parameterized spec
+// ("role:editor,admin"), or a []string of several names — e.g.
+// .Middleware("auth") or .Middleware([]string{"web", "auth"}). Names are
+// resolved (against the kernel's RouteMiddleware registry, its
+// MiddlewareGroups, and finally its service container), filtered by
+// WithoutMiddleware, and sorted by MiddlewarePriority at dispatch time —
+// see Kernel.resolveRouteMiddleware.
+func (r *RouteDefinition) Middleware(names ...any) *RouteDefinition {
+	flat := flattenMiddlewareNames(names)
 	r.mu.Lock()
-	r.middlewareNames = append(r.middlewareNames, names...)
+	r.middlewareNames = append(r.middlewareNames, flat...)
+	r.mu.Unlock()
+	return r
+}
+
+// WithoutMiddleware excludes middleware — by base name, ignoring any
+// parameters — from this route, even if an enclosing group would otherwise
+// contribute it. Equivalent to Laravel's ->withoutMiddleware().
+func (r *RouteDefinition) WithoutMiddleware(names ...any) *RouteDefinition {
+	flat := flattenMiddlewareNames(names)
+	r.mu.Lock()
+	if r.withoutNames == nil {
+		r.withoutNames = make(map[string]bool, len(flat))
+	}
+	for _, n := range flat {
+		r.withoutNames[n] = true
+	}
 	r.mu.Unlock()
 	return r
 }
@@ -304,6 +433,16 @@ func (r *RouteDefinition) middlewareNamesCopy() []string {
 	defer r.mu.RUnlock()
 	out := make([]string, len(r.middlewareNames))
 	copy(out, r.middlewareNames)
+	return out
+}
+
+func (r *RouteDefinition) withoutMiddlewareCopy() map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]bool, len(r.withoutNames))
+	for k := range r.withoutNames {
+		out[k] = true
+	}
 	return out
 }
 
@@ -409,7 +548,7 @@ func stringifyParam(params map[string]any, name string) (string, bool) {
 // fluent group builder.
 // ---------------------------------------------------------------------------
 
-// RouteGroup accumulates shared attributes (URI prefix, middleware aliases,
+// RouteGroup accumulates shared attributes (URI prefix, middleware specs,
 // and route-name prefix) for a set of routes. Every fluent method returns a
 // new RouteGroup rather than mutating the receiver, so a group can be reused
 // as the base for several independent sub-groups without cross-contaminating
@@ -439,11 +578,13 @@ func (g *RouteGroup) Prefix(prefix string) *RouteGroup {
 	return c
 }
 
-// Middleware appends middleware aliases to the group, equivalent to
-// Route::middleware().
-func (g *RouteGroup) Middleware(names ...string) *RouteGroup {
+// Middleware appends middleware specs to the group, equivalent to
+// Route::middleware(). Accepts the same "auth" / "role:editor,admin" /
+// []string{"web", "auth"} forms as RouteDefinition.Middleware.
+func (g *RouteGroup) Middleware(names ...any) *RouteGroup {
+	flat := flattenMiddlewareNames(names)
 	c := g.clone()
-	c.middleware = append(c.middleware, names...)
+	c.middleware = append(c.middleware, flat...)
 	return c
 }
 
@@ -530,69 +671,222 @@ var allMethods = []string{
 }
 
 // ---------------------------------------------------------------------------
-// Kernel: Golite's HTTP kernel — global middleware, the route table, named
-// routes, middleware aliases, and the fallback route.
+// Kernel: Golite's HTTP kernel — global middleware, route (aliased) and
+// grouped middleware registries, middleware priority, the route table,
+// named routes, and the fallback route.
 // ---------------------------------------------------------------------------
 
+// resolvedMiddleware pairs a middleware instance with the parameters (if
+// any) it was invoked with, and the base name it was resolved from — the
+// name is kept around purely so MiddlewarePriority can sort by it.
+type resolvedMiddleware struct {
+	name   string
+	mw     Middleware
+	params []string
+}
+
 // Kernel is Golite's HTTP kernel: it owns the global middleware stack, the
-// route table, named routes, and middleware aliases, and dispatches every
+// named/grouped route-middleware registries and their priority order, the
+// route table, named routes, and the fallback route, and dispatches every
 // incoming request through them. It implements http.Handler so it can be
 // passed straight to http.ListenAndServe, mirroring Laravel's
 // App\Http\Kernel + the Router that sits behind the Route facade.
 type Kernel struct {
 	container *container.Container
 
-	mu                sync.RWMutex
-	globalMiddleware  []HandlerFunc
-	middlewareAliases map[string]HandlerFunc
-	routes            []*RouteDefinition
-	namedRoutes       map[string]*RouteDefinition
-	fallback          *RouteDefinition
+	mu sync.RWMutex
+
+	// GlobalMiddleware runs on every request, in registration order, before
+	// routing is resolved — Laravel's $middleware.
+	GlobalMiddleware []Middleware
+
+	// RouteMiddleware maps a short alias (e.g. "auth") to the middleware
+	// that implements it — Laravel's $routeMiddleware / middleware aliases.
+	// Route/group middleware not found here falls back to a lookup on the
+	// service container by the same name (see Kernel.Container), so a
+	// middleware struct can also just be Bind'd into the container.
+	RouteMiddleware map[string]Middleware
+
+	// MiddlewareGroups maps a group name (e.g. "web") to an ordered list of
+	// other middleware names — Laravel's $middlewareGroups. Referencing a
+	// group name in .Middleware(...) expands to its members (recursively,
+	// if a member is itself a group name).
+	MiddlewareGroups map[string][]string
+
+	// MiddlewarePriority defines the order non-global middleware run in,
+	// regardless of the order they were assigned on a route or pulled in
+	// via a group — Laravel's $middlewarePriority. Middleware not listed
+	// here run after every listed one, in their original relative order.
+	// Intended to be configured once at boot, before the server starts
+	// serving requests.
+	MiddlewarePriority []string
+
+	routes      []*RouteDefinition
+	namedRoutes map[string]*RouteDefinition
+	fallback    *RouteDefinition
 }
 
 // NewKernel creates a Kernel bound to the given service container.
 func NewKernel(c *container.Container) *Kernel {
 	k := &Kernel{
-		container:         c,
-		middlewareAliases: make(map[string]HandlerFunc),
-		namedRoutes:       make(map[string]*RouteDefinition),
+		container:        c,
+		RouteMiddleware:  make(map[string]Middleware),
+		MiddlewareGroups: make(map[string][]string),
+		namedRoutes:      make(map[string]*RouteDefinition),
 	}
 	setDefaultKernel(k)
 	return k
+}
+
+// Container returns the kernel's service container, so middleware can be
+// registered by binding an instance into it (Kernel.RouteMiddleware lookups
+// fall back to the container by name) rather than only via AliasMiddleware
+// — see the "role"/"audit" middleware in routes/web.go for an example.
+func (k *Kernel) Container() *container.Container {
+	return k.container
 }
 
 // UseMiddleware registers one or more global middleware, executed on every
 // request — including ones that end up in the fallback or 404 handler — in
 // the order they were added, and always before routing is resolved (so
 // middleware like method-spoofing can influence which route matches).
-func (k *Kernel) UseMiddleware(middleware ...HandlerFunc) {
+func (k *Kernel) UseMiddleware(middleware ...Middleware) {
 	k.mu.Lock()
-	k.globalMiddleware = append(k.globalMiddleware, middleware...)
+	k.GlobalMiddleware = append(k.GlobalMiddleware, middleware...)
 	k.mu.Unlock()
 }
 
-// AliasMiddleware registers a named middleware, so routes and groups can
-// reference it by string (Route::middleware("auth")) instead of needing a
-// direct HandlerFunc reference.
-func (k *Kernel) AliasMiddleware(name string, mw HandlerFunc) {
+// AliasMiddleware registers a named middleware in the RouteMiddleware
+// registry, so routes and groups can reference it by string
+// (Route::middleware("auth")) instead of needing a direct Middleware value.
+func (k *Kernel) AliasMiddleware(name string, mw Middleware) {
 	k.mu.Lock()
-	k.middlewareAliases[name] = mw
+	k.RouteMiddleware[name] = mw
 	k.mu.Unlock()
 }
 
-func (k *Kernel) resolveMiddleware(names []string) []HandlerFunc {
-	if len(names) == 0 {
-		return nil
-	}
+// MiddlewareGroup defines (or extends, if called again with the same name)
+// a named middleware group — Laravel's $middlewareGroups — accepting the
+// same "name" / "name:params" / []string forms as Route/RouteGroup
+// Middleware.
+func (k *Kernel) MiddlewareGroup(name string, members ...any) {
+	flat := flattenMiddlewareNames(members)
+	k.mu.Lock()
+	k.MiddlewareGroups[name] = append(k.MiddlewareGroups[name], flat...)
+	k.mu.Unlock()
+}
+
+// lookupMiddleware resolves a base middleware name against the
+// RouteMiddleware registry first, then falls back to the service
+// container — the mechanism behind Kernel.Container's doc comment.
+func (k *Kernel) lookupMiddleware(name string) (Middleware, bool) {
 	k.mu.RLock()
-	defer k.mu.RUnlock()
-	resolved := make([]HandlerFunc, 0, len(names))
-	for _, name := range names {
-		if mw, ok := k.middlewareAliases[name]; ok {
-			resolved = append(resolved, mw)
+	mw, ok := k.RouteMiddleware[name]
+	k.mu.RUnlock()
+	if ok {
+		return mw, true
+	}
+
+	if k.container == nil {
+		return nil, false
+	}
+	if svc := k.container.Make(name); svc != nil {
+		if mw, ok := svc.(Middleware); ok {
+			return mw, true
 		}
 	}
+	return nil, false
+}
+
+// expandMiddlewareNames replaces any spec whose base name matches a
+// MiddlewareGroups entry with that group's members, recursively (so a
+// group can itself reference another group), guarding against cycles.
+func (k *Kernel) expandMiddlewareNames(specs []string, visiting map[string]bool) []string {
+	k.mu.RLock()
+	groups := k.MiddlewareGroups
+	k.mu.RUnlock()
+
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		base, _ := ParseMiddlewareSpec(spec)
+		members, isGroup := groups[base]
+		if !isGroup || visiting[base] {
+			out = append(out, spec)
+			continue
+		}
+		visiting[base] = true
+		out = append(out, k.expandMiddlewareNames(members, visiting)...)
+		delete(visiting, base)
+	}
+	return out
+}
+
+// sortByPriority stable-sorts resolved middleware according to
+// MiddlewarePriority: entries whose base name appears there are ordered by
+// that list's index; everything else keeps its original relative order,
+// after every prioritized entry.
+func (k *Kernel) sortByPriority(list []resolvedMiddleware) {
+	k.mu.RLock()
+	priority := k.MiddlewarePriority
+	k.mu.RUnlock()
+	if len(priority) == 0 {
+		return
+	}
+
+	rank := make(map[string]int, len(priority))
+	for i, name := range priority {
+		rank[name] = i
+	}
+	unranked := len(priority)
+
+	sort.SliceStable(list, func(i, j int) bool {
+		ri, oki := rank[list[i].name]
+		rj, okj := rank[list[j].name]
+		if !oki {
+			ri = unranked
+		}
+		if !okj {
+			rj = unranked
+		}
+		return ri < rj
+	})
+}
+
+// resolveRouteMiddleware expands the route's middleware specs (including
+// whatever its enclosing group(s) contributed) through MiddlewareGroups,
+// removes anything the route excluded via WithoutMiddleware, resolves each
+// remaining spec to an actual Middleware + its parameters, and sorts the
+// result by MiddlewarePriority.
+func (k *Kernel) resolveRouteMiddleware(route *RouteDefinition) []resolvedMiddleware {
+	specs := k.expandMiddlewareNames(route.middlewareNamesCopy(), make(map[string]bool))
+	excluded := route.withoutMiddlewareCopy()
+
+	resolved := make([]resolvedMiddleware, 0, len(specs))
+	for _, spec := range specs {
+		name, params := ParseMiddlewareSpec(spec)
+		if excluded[name] {
+			continue
+		}
+		mw, ok := k.lookupMiddleware(name)
+		if !ok {
+			continue // unresolved middleware name: silently skipped
+		}
+		resolved = append(resolved, resolvedMiddleware{name: name, mw: mw, params: params})
+	}
+
+	k.sortByPriority(resolved)
 	return resolved
+}
+
+// toHandler wraps a resolved middleware into a HandlerFunc suitable for
+// splicing into a Context's handler chain: it records the middleware as
+// "executed" (so Kernel.terminate can find it after the response is sent)
+// and calls its Handle method, passing Context.Next as the "next" callback.
+func toHandler(mw Middleware, params []string) HandlerFunc {
+	return func(c *Context) {
+		c.executed = append(c.executed, mw)
+		mw.Handle(c, c.Next, params...)
+	}
 }
 
 func (k *Kernel) registerNamedRoute(name string, r *RouteDefinition) {
@@ -627,6 +921,7 @@ func (k *Kernel) addRoute(methods []string, uri string, handler HandlerFunc, pre
 		wheres:          make(map[string]string),
 		defaults:        make(map[string]string),
 		middlewareNames: middlewareNames,
+		withoutNames:    make(map[string]bool),
 	}
 	route.recompile()
 
@@ -680,8 +975,10 @@ func (k *Kernel) Prefix(prefix string) *RouteGroup {
 }
 
 // Middleware starts a new route group with shared middleware, equivalent to
-// Route::middleware(...)->group(...).
-func (k *Kernel) Middleware(names ...string) *RouteGroup {
+// Route::middleware(...)->group(...). Accepts the same "auth" /
+// "role:editor,admin" / []string{"web", "auth"} forms as
+// RouteDefinition.Middleware.
+func (k *Kernel) Middleware(names ...any) *RouteGroup {
 	return (&RouteGroup{kernel: k}).Middleware(names...)
 }
 
@@ -768,15 +1065,18 @@ func (k *Kernel) match(method, path string) (route *RouteDefinition, params map[
 // always the last handler in Context's chain (see ServeHTTP), so it runs
 // after every global middleware — including MethodSpoofingMiddleware, which
 // means route matching sees the (possibly overridden) final HTTP method.
-// On a match, route-specific middleware and the route handler are spliced
-// into the same Context's handler chain and executed via a nested Next(),
-// keeping the whole request in a single onion-style pipeline.
+// On a match, the route's middleware (expanded, filtered, resolved, and
+// priority-sorted by resolveRouteMiddleware) plus the route handler are
+// spliced into the same Context's handler chain and executed via a nested
+// Next(), keeping the whole request in a single onion-style pipeline.
 func (k *Kernel) dispatch(c *Context) {
 	route, params, pathMatched, allowed := k.match(c.Request.Method, c.Request.URL.Path)
 
 	if route != nil {
 		c.params = params
-		c.handlers = append(c.handlers, k.resolveMiddleware(route.middlewareNamesCopy())...)
+		for _, rm := range k.resolveRouteMiddleware(route) {
+			c.handlers = append(c.handlers, toHandler(rm.mw, rm.params))
+		}
 		c.handlers = append(c.handlers, route.handler)
 		c.Next()
 		return
@@ -799,22 +1099,39 @@ func (k *Kernel) dispatch(c *Context) {
 	c.JSON(http.StatusNotFound, map[string]string{"error": "404 not found"})
 }
 
+// terminate runs Terminate on every middleware that actually executed
+// during this request and implements TerminableMiddleware, in the order
+// they ran — Golite's equivalent of Laravel's Kernel::terminate(), called
+// once the response has been fully written.
+func (k *Kernel) terminate(c *Context) {
+	for _, mw := range c.executed {
+		if t, ok := mw.(TerminableMiddleware); ok {
+			t.Terminate(c)
+		}
+	}
+}
+
 // ServeHTTP builds the request's middleware chain — every global middleware
-// followed by the kernel's own routing dispatch — and runs it. This is
-// Golite's front controller, the equivalent of Laravel's
-// public/index.php -> Kernel::handle().
+// followed by the kernel's own routing dispatch — runs it, and then runs
+// Kernel.terminate. This is Golite's front controller, the equivalent of
+// Laravel's public/index.php -> Kernel::handle() -> $response->send() ->
+// Kernel::terminate().
 func (k *Kernel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	k.mu.RLock()
-	global := make([]HandlerFunc, len(k.globalMiddleware))
-	copy(global, k.globalMiddleware)
+	global := make([]Middleware, len(k.GlobalMiddleware))
+	copy(global, k.GlobalMiddleware)
 	k.mu.RUnlock()
 
 	chain := make([]HandlerFunc, 0, len(global)+1)
-	chain = append(chain, global...)
+	for _, mw := range global {
+		chain = append(chain, toHandler(mw, nil))
+	}
 	chain = append(chain, k.dispatch)
 
 	ctx := newContext(w, r, k.container, chain)
 	ctx.Next()
+
+	k.terminate(ctx)
 }
 
 // ---------------------------------------------------------------------------

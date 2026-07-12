@@ -5,21 +5,51 @@ import (
 
 	apphttp "Golite/app/Http"
 	"Golite/app/Http/Controllers"
+	"Golite/app/Http/Middleware"
 )
 
 // MapWebRoutes registers the application's web routes onto the kernel,
-// mirroring routes/web.php. It demonstrates every routing feature the
-// kernel supports: HTTP verb helpers, Match/Any, required and optional
-// parameters with default values, regex constraints, named routes with URL
-// generation, nested groups (prefix + middleware + name prefix), a
-// redirect, and a fallback route.
+// mirroring routes/web.php. It demonstrates every routing and middleware
+// feature the kernel supports: HTTP verb helpers, Match/Any, required and
+// optional parameters with default values, regex constraints, named routes
+// with URL generation, nested groups (prefix + middleware + name prefix), a
+// redirect, a fallback route, middleware priority, middleware groups,
+// parameterized middleware ("role:editor,admin"), excluding a group's
+// middleware on one route (WithoutMiddleware), and a middleware resolved
+// straight from the service container.
 func MapWebRoutes(kernel *apphttp.Kernel) {
 	userController := controllers.NewUserController()
 
-	// A minimal "auth" middleware alias, purely to demonstrate string-based
-	// middleware references inside groups, mirroring Laravel's named
-	// middleware (the "auth" key in app/Http/Kernel.php).
-	kernel.AliasMiddleware("auth", requireAuthHeader)
+	// --- Middleware priority: regardless of the order middleware is
+	// assigned on a route or pulled in via a group, it always executes in
+	// this order (anything not listed here runs last, in registration
+	// order) — equivalent to Laravel's $middlewarePriority. ---
+	kernel.MiddlewarePriority = []string{"auth", "role", "audit"}
+
+	// --- Route middleware: name -> Middleware, equivalent to Laravel's
+	// $routeMiddleware / Route::aliasMiddleware(). "auth" is a plain
+	// closure adapted via MiddlewareFunc; "role" is a parameterized
+	// middleware struct (see app/Http/Middleware/RoleMiddleware.go). ---
+	kernel.AliasMiddleware("auth", apphttp.MiddlewareFunc(func(c *apphttp.Context, next func()) {
+		if c.Request.Header.Get("Authorization") == "" {
+			c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next()
+	}))
+	kernel.AliasMiddleware("role", middleware.NewRole())
+
+	// A middleware struct built independently of the Kernel (so it could
+	// take injected dependencies via its constructor) and bound straight
+	// into the service container instead of the RouteMiddleware map —
+	// Kernel.resolveRouteMiddleware falls back to the container by name, so
+	// "audit" below is resolved directly through Golite's IoC container.
+	kernel.Container().Bind("audit", middleware.NewAudit())
+
+	// --- Middleware groups: name -> ordered list of other middleware
+	// names, equivalent to Laravel's $middlewareGroups. Referencing "web"
+	// on a route expands to ["auth", "audit"]. ---
+	kernel.MiddlewareGroup("web", "auth", "audit")
 
 	// --- HTTP verb helpers: Route::get/post/put/patch/delete/options ---
 	kernel.GET("/user", userController.Show).Name("user.show")
@@ -42,48 +72,50 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 		c.JSON(http.StatusOK, map[string]string{"greeting": "Hello, " + c.Param("name")})
 	}).Defaults(map[string]string{"name": "Guest"}).Name("greet")
 
-	kernel.GET("/posts/{post}/comments/{comment?}", resourceHandler("posts.comments.show")).
-		WhereNumber("post").
-		WhereNumber("comment").
-		Name("posts.comments.show")
-
-	// --- Regex constraints: ->where, ->whereMap, and the fluent helpers.
-	// A request whose parameters fail these constraints simply doesn't
-	// match the route (falling through to a 404), exactly like Laravel. ---
+	// --- Regex constraints: ->where and the fluent helpers. A request
+	// whose parameters fail these constraints simply doesn't match the
+	// route (falling through to a 404), exactly like Laravel. ---
 	kernel.GET("/articles/{id}", resourceHandler("articles.show")).
 		Where("id", `[0-9]+`).
 		Name("articles.show")
-
-	kernel.GET("/products/{category}/{sku}", resourceHandler("products.show")).
-		WhereMap(map[string]string{
-			"category": "[a-z-]+",
-			"sku":      "[A-Z0-9]+",
-		}).
-		Name("products.show")
-
-	kernel.GET("/users/{id}", userController.Show).
-		WhereNumber("id").
-		Name("users.show")
-
-	kernel.GET("/tags/{slug}", resourceHandler("tags.show")).
-		WhereAlphaNumeric("slug").
-		Name("tags.show")
-
-	kernel.GET("/authors/{name}", resourceHandler("authors.show")).
-		WhereAlpha("name").
-		Name("authors.show")
 
 	kernel.GET("/categories/{category}", resourceHandler("categories.index")).
 		WhereIn("category", []string{"news", "sports", "tech"}).
 		Name("categories.index")
 
-	// --- Route groups: shared prefix, middleware, and name prefix.
-	// Equivalent to:
-	//   Route::prefix("admin")->middleware("auth")->name("admin.")->group(func () {
-	//       Route::get("/users", [UserController::class, "show"])->name("users");
+	// --- Route groups + middleware groups: .Middleware("web") expands
+	// (via MiddlewareGroups) to ["auth", "audit"]. Equivalent to:
+	//   Route::middleware(["web"])->group(function () {
+	//       Route::get("/dashboard", ...)->name("dashboard");
 	//   });
-	kernel.Prefix("admin").Middleware("auth").Name("admin.").Group(func(admin *apphttp.RouteGroup) {
+	kernel.Middleware("web").Group(func(g *apphttp.RouteGroup) {
+		g.GET("/dashboard", resourceHandler("dashboard")).Name("dashboard")
+	})
+
+	// --- Parameterized middleware: "role:editor,admin" is parsed into base
+	// name "role" and params ["editor", "admin"], which reach Role.Handle. ---
+	kernel.GET("/posts/{post}/edit", resourceHandler("posts.edit")).
+		WhereNumber("post").
+		Middleware("auth", "role:editor,admin").
+		Name("posts.edit")
+
+	// --- Nested groups, a slice-form Middleware() call, and
+	// WithoutMiddleware excluding a group-contributed middleware on one
+	// specific route. Equivalent to:
+	//   Route::prefix("admin")->middleware(["web", "role:admin"])->name("admin.")->group(function () {
+	//       Route::get("/users", ...)->name("users");
+	//       Route::get("/health", ...)->withoutMiddleware("audit")->name("health");
+	//   });
+	kernel.Prefix("admin").Middleware([]string{"web", "role:admin"}).Name("admin.").Group(func(admin *apphttp.RouteGroup) {
 		admin.GET("/users", userController.Show).Name("users") // GET /admin/users, named "admin.users"
+
+		// This route sits inside "admin" (which pulls in "web" ->
+		// auth+audit, plus "role:admin"), but opts out of auditing
+		// specifically for this one endpoint — e.g. a lightweight health
+		// check that shouldn't be written to the audit trail.
+		admin.GET("/health", func(c *apphttp.Context) {
+			c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+		}).WithoutMiddleware("audit").Name("health")
 
 		// Nested groups inherit and extend the parent's prefix, name
 		// prefix, and middleware.
@@ -115,13 +147,4 @@ func resourceHandler(name string) apphttp.HandlerFunc {
 			"params": c.Params(),
 		})
 	}
-}
-
-// requireAuthHeader is a minimal demo middleware bound to the "auth" alias.
-func requireAuthHeader(c *apphttp.Context) {
-	if c.Request.Header.Get("Authorization") == "" {
-		c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-	c.Next()
 }
