@@ -16,8 +16,12 @@ type hashService interface {
 }
 
 // UserController groups user-facing endpoints, analogous to Laravel's
-// App\Http\Controllers\UserController.
-type UserController struct{}
+// App\Http\Controllers\UserController. It embeds the base Controller (see
+// Controller.go) purely for consistency with the rest of the framework's
+// controllers — it doesn't declare any middleware of its own.
+type UserController struct {
+	Controller
+}
 
 // NewUserController creates a new UserController.
 func NewUserController() *UserController {

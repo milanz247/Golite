@@ -18,7 +18,9 @@ import (
 // middleware on one route (WithoutMiddleware), a middleware resolved
 // straight from the service container, CSRF protection, request-inspection
 // helpers, the unified input payload, encrypted cookies, flash/old input,
-// and file uploads.
+// file uploads, and controller/resource routing (Resource, ApiResource,
+// nested + shallow resources, singleton resources, and a single-action
+// controller).
 func MapWebRoutes(kernel *apphttp.Kernel) {
 	userController := controllers.NewUserController()
 
@@ -63,12 +65,12 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	kernel.MiddlewareGroup("web", "auth", "audit")
 
 	// --- HTTP verb helpers: Route::get/post/put/patch/delete/options ---
+	// (individual PUT/PATCH/DELETE/etc. handlers for "/posts/{post}" used
+	// to be demonstrated by hand here; they've been superseded by
+	// kernel.Resource("posts", postController) further down, which covers
+	// the same methods/paths — see the "Controllers & resource routing"
+	// section — so registering both would collide.)
 	kernel.GET("/user", userController.Show).Name("user.show")
-	kernel.POST("/posts", resourceHandler("posts.store")).Name("posts.store")
-	kernel.PUT("/posts/{post}", resourceHandler("posts.update")).WhereNumber("post").Name("posts.update")
-	kernel.PATCH("/posts/{post}", resourceHandler("posts.patch")).WhereNumber("post").Name("posts.patch")
-	kernel.DELETE("/posts/{post}", resourceHandler("posts.destroy")).WhereNumber("post").Name("posts.destroy")
-	kernel.OPTIONS("/posts", resourceHandler("posts.options"))
 
 	// --- Route::match and Route::any ---
 	kernel.Match([]string{http.MethodGet, http.MethodPost}, "/posts/search", resourceHandler("posts.search")).
@@ -174,8 +176,10 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 
 	// --- Unified input: All/Input (with a default)/Has/Only/Except/
 	// Boolean, merging query parameters, a JSON body, and form fields
-	// (whichever the request actually sent) into one payload. ---
-	kernel.POST("/profile", func(c *apphttp.Context) {
+	// (whichever the request actually sent) into one payload. Named
+	// "account.*", not "profile.*" — that name (and a real POST /profile
+	// route) belongs to the Singleton resource demo further down. ---
+	kernel.POST("/account", func(c *apphttp.Context) {
 		if !c.Has("name", "email") {
 			c.JSON(http.StatusUnprocessableEntity, map[string]string{"error": "name and email are required"})
 			return
@@ -187,7 +191,7 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 			"nickname":   c.Input("nickname", "anonymous"),
 			"newsletter": c.Boolean("newsletter"),
 		})
-	}).Name("profile.update")
+	}).Name("account.update")
 
 	// --- Encrypted, authenticated cookies: SetCookie/Cookie. ---
 	kernel.GET("/cookie/set", func(c *apphttp.Context) {
@@ -251,6 +255,59 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 			"stored_at":     path,
 		})
 	}).Name("avatar.upload")
+
+	// --- Controllers & resource routing ---
+
+	// PostController takes a constructor-injected dependency resolved from
+	// the service container — Golite's equivalent of Laravel's automatic
+	// controller-constructor dependency injection — and declares its own
+	// middleware via the embedded Controller base: "auth" applies to every
+	// action except Index and Show.
+	postController := controllers.NewPostController(kernel.Container().Make("hash").(controllers.Hasher))
+
+	// Route::resource: registers Index/Store/Show/Update/Destroy. Create
+	// and Edit are skipped automatically, since reflection finds no such
+	// methods on PostController (see Kernel.Resource's "automatically
+	// inspect the controller" behavior in app/Http/Resource.go) — a GET to
+	// /posts/create therefore falls through to Show with post="create",
+	// exactly like it would under Laravel's apiResource().
+	kernel.Resource("posts", postController)
+
+	// Route::apiResource, scoped inside a "api" prefix + name group: the
+	// same controller, already missing Create/Edit by definition, and this
+	// call also excludes Destroy via .Except(...).
+	kernel.Prefix("api").Name("api.").Group(func(g *apphttp.RouteGroup) {
+		g.ApiResource("posts", postController).Except([]string{"destroy"})
+	})
+
+	// Nested + shallow resource routing: comments nest under their photo
+	// for the collection actions (index/store), but Shallow() promotes the
+	// member actions (show/update/destroy) to /comments/{comment}
+	// directly, since a comment's own ID is already globally unique.
+	// Equivalent to:
+	//   Route::resource('photos.comments', CommentController::class)->shallow();
+	commentController := controllers.NewCommentController()
+	kernel.Resource("photos.comments", commentController).Shallow()
+
+	// Singleton resource: a resource with exactly one instance, so its
+	// routes carry no {id} segment — Show/Edit/Update by default, plus
+	// Create/Store via .Creatable().
+	profileController := controllers.NewProfileController()
+	kernel.Singleton("profile", profileController).Creatable()
+
+	// Single-action (invokable) controller: registered directly on a route
+	// via InvokableHandler rather than a named method, equivalent to
+	// Route::post('/server', ProvisionServerController::class). Its own
+	// declared middleware isn't picked up automatically the way
+	// Resource/ApiResource/Singleton do it — a plain verb route has no
+	// other way to know a controller was involved at all — so it's
+	// attached explicitly via ApplyControllerMiddleware.
+	provisionController := controllers.NewProvisionServerController()
+	apphttp.ApplyControllerMiddleware(
+		kernel.POST("/server", apphttp.InvokableHandler(provisionController)),
+		provisionController,
+		apphttp.InvokeAction,
+	).Name("server.provision")
 
 	// --- Redirect shortcut: Route::redirect($from, $to, $status) ---
 	kernel.Redirect("/home", "/user", http.StatusFound)
