@@ -1,26 +1,14 @@
 package routes
 
 import (
-	"golite/app/http/controllers"
+	apphttp "Golite/app/Http"
+	"Golite/app/Http/Controllers"
 )
 
-// Kernel එකට handle කළ හැකි router interface එකක් සාදා ගැනීම
-type Router interface {
-	GET(path string, handler func(*interface{})) // පොදු interface එකක් සඳහා
-}
-
-func MapWebRoutes(router interface{}) {
-	// Type assertion මඟින් අපේ Kernel router එක හඳුනාගැනීම
-	r := router.(interface {
-		GET(path string, handler func(*interface{})) // Type match කිරීම සඳහා mock
-	})
-
+// MapWebRoutes registers the application's web routes onto the kernel,
+// mirroring the route definitions found in Laravel's routes/web.php.
+func MapWebRoutes(kernel *apphttp.Kernel) {
 	userController := controllers.NewUserController()
 
-	// Route එකක් සාදා Controller method එකකට සම්බන්ධ කිරීම
-	r.GET("/user/profile", func(ctx *interface{}) {
-		// Context එක නිවැරදි type එකට හැරවීම (Cast)
-		actualCtx := ctx.(*interface{}) // Note: Type alignment with HTTP kernel context
-		_ = actualCtx
-	})
+	kernel.GET("/user", userController.Show)
 }

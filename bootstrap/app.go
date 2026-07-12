@@ -1,38 +1,54 @@
 package bootstrap
 
 import (
-	"golite/app/http"
-	"golite/container"
-	"golite/app/providers"
+	apphttp "Golite/app/Http"
+	"Golite/app/Providers"
+	"Golite/config"
+	"Golite/container"
 )
 
+// Application is Golite's core, analogous to Laravel's Illuminate\Foundation\Application:
+// it wires together the service container, configuration, and service
+// providers, then drives the Register -> Boot lifecycle before the server
+// starts.
 type Application struct {
 	Container *container.Container
-	Providers []providers.ServiceProvider
+	Config    *config.Config
+	Kernel    *apphttp.Kernel
+
+	providers []providers.ServiceProvider
 }
 
+// NewApplication boots the container, loads configuration from .env, and
+// prepares the HTTP kernel — the Go equivalent of Laravel's
+// bootstrap/app.php.
 func NewApplication() *Application {
-	app := &Application{
-		Container: container.New(),
-		Providers: []providers.ServiceProvider{},
+	c := container.New()
+	cfg := config.LoadConfig()
+	kernel := apphttp.NewKernel(c)
+
+	c.Bind("config", cfg)
+	c.Bind("kernel", kernel)
+
+	return &Application{
+		Container: c,
+		Config:    cfg,
+		Kernel:    kernel,
 	}
-
-	// Core Kernel එක Container එකට Bind කිරීම
-	kernel := http.NewKernel(app.Container)
-	app.Container.Bind("kernel", kernel)
-
-	return app
 }
 
-// Service Providers ලියාපදිංචි කිරීම
-func (app *Application) RegisterProvider(p providers.ServiceProvider) {
-	app.Providers = append(app.Providers, p)
+// Register adds a service provider and immediately invokes its Register
+// method, letting it bind services into the container right away.
+func (app *Application) Register(p providers.ServiceProvider) {
+	app.providers = append(app.providers, p)
 	p.Register(app.Container)
 }
 
-// සර්වර් එක Run වීමට ප්‍රථම Providers සක්‍රීය කිරීම
-func (app *Application) BootProviders() {
-	for _, p := range app.Providers {
+// Boot runs every registered provider's Boot method. This must happen right
+// before the HTTP server starts serving requests, mirroring Laravel's
+// provider boot phase.
+func (app *Application) Boot() {
+	for _, p := range app.providers {
 		p.Boot(app.Container)
 	}
 }
