@@ -40,7 +40,13 @@ Golite/
 │       ├── migration.go              # Migration interface, Register/All (self-registration via init())
 │       ├── runner.go                 # Runner: batch-tracked Migrate/Rollback against the "migrations" table
 │       ├── 2026_07_13_000001_create_users_table.go
-│       └── 2026_07_13_000002_create_posts_table.go
+│       └── 2026_07_13_000002_create_password_reset_tokens_table.go
+├── auth/
+│   ├── guard.go                      # Guard: Register/Attempt/Login/Logout/Check/User (session-backed)
+│   ├── remember.go                   # "Remember me": IssueRememberToken/UserByRememberToken, cookie encode/decode
+│   ├── password_reset.go             # PasswordResetToken, CreatePasswordResetToken/ResetPassword
+│   ├── token.go                      # newRandomToken/tokenHashEquals, shared by remember-me + reset tokens
+│   └── errors.go                     # ErrEmailTaken, ErrInvalidCredentials, ErrInvalidRememberToken, ...
 ├── bootstrap/
 │   └── app.go                    # Application struct: wires container, config, providers, kernel
 ├── app/
@@ -48,11 +54,11 @@ Golite/
 │   │   ├── ServiceProvider.go        # ServiceProvider interface (Register/Boot)
 │   │   ├── AppServiceProvider.go     # Binds core app services ("hash", "encrypter", "log")
 │   │   ├── DatabaseServiceProvider.go # OpenDatabase + GORM/MySQL, binds "db"
+│   │   ├── AuthServiceProvider.go    # Builds *auth.Guard from "db"+"hash", binds "auth"
 │   │   └── RouteServiceProvider.go   # Maps routes onto the kernel during Boot
 │   ├── Models/
 │   │   ├── Model.go                  # Base Model: ID/CreatedAt/UpdatedAt/DeletedAt
-│   │   ├── User.go                   # Example model + HasMany Posts
-│   │   └── Post.go                   # Example related model + BelongsTo User
+│   │   └── User.go                   # Name/Email/Password/RememberToken
 │   ├── Exceptions/
 │   │   ├── exceptions.go             # HttpException, Abort/NotFound/Forbidden/Unauthorized/BadRequest
 │   │   └── Handler.go                # Render (panic -> JSON response), ShouldReport
@@ -81,6 +87,7 @@ Golite/
 │       │   ├── MethodSpoofingMiddleware.go  # Global, "before"-style: PUT/PATCH/DELETE spoofing for HTML forms
 │       │   ├── RoleMiddleware.go            # Parameterized, struct-based (e.g. "role:editor,admin")
 │       │   ├── AuditMiddleware.go           # Terminable: Handle + Terminate, DI-resolvable via the container
+│       │   ├── AuthMiddleware.go            # Session-or-remember-me auth guard (docs/authentication.md)
 │       │   ├── StartSessionMiddleware.go    # Attaches a Session to every request; saves it back afterward
 │       │   ├── VerifyCsrfToken.go           # CSRF protection: session-bound token, Except wildcards, XSRF-TOKEN cookie
 │       │   ├── TrimStringsMiddleware.go             # Trims whitespace from every input string
@@ -89,22 +96,9 @@ Golite/
 │       │   └── TrustHosts.go                        # Rejects requests with an untrusted Host header
 │       └── Controllers/
 │           ├── Controller.go                  # Base Controller: per-action middleware rules
-│           ├── UserController.go              # Method-injected Hasher + *config.Config (controllers.md#method-injection)
-│           ├── PostController.go               # Full resource + DI + controller middleware
-│           ├── CommentController.go             # Nested + shallow resource demo
-│           ├── ProfileController.go             # Singleton resource demo
-│           ├── ProvisionServerController.go     # Invokable (single-action) controller demo
-│           ├── CryptoController.go              # Encrypt/Decrypt, method-injected *encryption.Encrypter (encryption.md)
-│           ├── HashController.go                # Make/Check, method-injected Hasher (hashing.md)
-│           ├── ValidationController.go          # Register (validation.md)
-│           ├── ErrorDemoController.go           # Abort/NotFound/Boom (error-handling.md)
-│           ├── LogController.go                 # Demo, method-injected logging.Logger (logging.md)
-│           └── Home.go                           # Index: plain-function controller (controllers.md#plain-function-controllers)
+│           └── AuthController.go               # Register/Login/Logout/Me/ForgotPassword/ResetPassword (docs/authentication.md)
 ├── routes/
 │   └── web.go                    # MapWebRoutes: registers paths onto the kernel
-├── resources/
-│   └── views/
-│       └── welcome.html          # Sample html/template for Response.View
 └── public/
     └── main.go                   # Entry point / front controller
 ```
@@ -122,7 +116,7 @@ Golite/
 | `app/Http/Response.go` (`Response`)       | `Illuminate\Http\Response` / `RedirectResponse` |
 | `app/Http/Context.go` (`Context`)         | `Illuminate\Http\Request` + response helpers |
 | `app/Http/Session/` (`Manager`, `Session`, `Handler`) | `Illuminate\Session\SessionManager` + `Store` + a driver |
-| `resources/views/*.html`                  | `resources/views/*.blade.php`                |
+| `resources/views/*.html` (created on demand — see `Context.View`) | `resources/views/*.blade.php`                |
 | `app/Http/Middleware/*.go`                | `app/Http/Middleware/*.php`                  |
 | `app/Http/Controllers/Controller.go`      | `Illuminate\Routing\Controller`              |
 | `app/Http/Controllers/*.go`               | `app/Http/Controllers/*.php`                 |
@@ -149,12 +143,16 @@ Golite/
   `Application` *extends* `Container`, so `$app` and the container are the
   same object for resolution purposes (`app()->make(...)`). Naming the field
   `App` preserves that semantic in Go without the cycle.
-- **Controllers never import `app/Providers`.** `UserController` declares a
-  small local interface (`hashService`) and type-asserts whatever the
-  container returns for `"hash"`. Go's structural typing means the concrete
-  type (`*hashing.Manager`, bound by `AppServiceProvider` — see
-  [hashing.md](hashing.md)) never needs to be imported by the controller,
-  which avoids a `controllers → providers → routes → controllers` cycle.
+- **Controllers never import `app/Providers`.** `AuthServiceProvider`
+  builds a `*auth.Guard` and binds it as `"auth"`; `AuthController`'s
+  actions take `*auth.Guard` as a method-injected parameter (see
+  [controllers.md](controllers.md#method-injection--apphttpinject)),
+  resolved from the container by `apphttp.Inject` — the controller
+  imports `"Golite/auth"` (a plain, dependency-free package) directly,
+  never `"Golite/app/Providers"`, which is what would create a
+  `controllers → providers → routes → controllers` cycle
+  (`RouteServiceProvider`, in `app/Providers`, imports `routes`, which
+  imports `app/Http/Controllers`).
 - **Package `http` under `app/Http`.** It shares its name with the standard
   library's `net/http` on purpose (mirroring Laravel's `Illuminate\Http`
   namespace) so framework code reads as `http.Context`, `http.Kernel`,
@@ -257,11 +255,13 @@ Golite/
   some `ResourceController` interface covering all 7 actions — `reflect`
   checks, per action, whether a same-named method with exactly the
   signature `func(*Context)` exists, and simply skips the route if not.
-  This lets a controller legitimately implement a subset (the demo
-  `PostController` has no `Create`/`Edit`) without needing `.Except(...)`
-  to say so, at the cost of a request that *would* have hit a skipped
-  action instead falling through to whatever else matches — same as real
-  Laravel under `apiResource()`. See
+  This lets a controller legitimately implement a subset (e.g. no
+  `Create`/`Edit`, the two HTML-presentation-only actions) without
+  needing `.Except(...)` to say so, at the cost of a request that *would*
+  have hit a skipped action instead falling through to whatever else
+  matches — same as real Laravel under `apiResource()`. `Kernel.Resource`/
+  `ApiResource`/`Singleton` (`app/Http/Resource.go`) are unchanged by this
+  build's route table narrowing to just authentication — see
   [controllers.md](controllers.md#automatically-inspect-the-controller--reflection-not-a-required-interface).
 - **`ResourceRegistrar`/`SingletonRegistrar` re-register their entire route
   set on every fluent call, instead of deferring registration the way
@@ -322,9 +322,11 @@ Golite/
   opt-in layer on top: it reflects on a handler's parameter *types* and
   resolves each one via `Container.ResolveType`'s "first assignable
   match" scan. Keeping this scoped to method injection (not baked into
-  `Make` itself) means the simple, non-reflective path is still there for
-  everything that doesn't need it — including `PostController`'s
-  constructor injection, unchanged. See
+  `Make` itself) means the simple, non-reflective, explicit constructor
+  injection style (still the right call whenever setup has to happen
+  *before* any action runs — see
+  [controllers.md](controllers.md#dependency-injection-two-flavors)) is
+  still there for anything that needs it, unchanged. See
   [controllers.md](controllers.md#method-injection--apphttpinject).
 - **`encryption.Encrypter` and the cookie/session engine's own
   AES-256-GCM helpers are deliberately independent, not unified.**

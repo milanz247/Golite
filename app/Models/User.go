@@ -1,10 +1,10 @@
 package models
 
-// User is Golite's example Eloquent-style model, analogous to Laravel's
-// App\Models\User. Embedding Model gives it ID/CreatedAt/UpdatedAt/
-// DeletedAt for free (see Model.go); Posts demonstrates a HasMany
-// association the same way Laravel's `public function posts()` would,
-// just declared structurally via a struct tag instead of a method.
+// User is Golite's user model — the record the top-level auth package's
+// Guard builds authentication around (see
+// app/Http/Controllers/AuthController.go and docs/authentication.md).
+// Embedding Model gives it ID/CreatedAt/UpdatedAt/DeletedAt for free (see
+// Model.go).
 type User struct {
 	Model
 
@@ -12,11 +12,12 @@ type User struct {
 	Email    string `gorm:"size:255;not null;uniqueIndex" json:"email"`
 	Password string `gorm:"size:255;not null" json:"-"`
 
-	// Posts is the inverse side of Post.User's BelongsTo — GORM infers
-	// the "user_id" foreign key from the User type name by convention,
-	// matched explicitly here for clarity. Loaded on demand via
-	// db.Preload("Posts").Find(&users), never eagerly by default.
-	Posts []Post `gorm:"foreignKey:UserID" json:"posts,omitempty"`
+	// RememberToken holds the SHA-256 hash of the current "remember me"
+	// token — empty if none has ever been issued, or the most recent one
+	// was cleared by logout. Never the raw token itself, the same
+	// reasoning Password holds a bcrypt hash rather than the plaintext.
+	// See auth.Guard.IssueRememberToken.
+	RememberToken string `gorm:"size:255" json:"-"`
 }
 
 // TableName pins the table name to "users" explicitly rather than relying

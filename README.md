@@ -54,13 +54,12 @@ structs and interfaces instead of reflection-based magic.
   controller can embed for its own per-action middleware
   (`.Middleware("auth").Except("index", "show")`), both constructor
   dependency injection *and* Laravel-style automatic method injection
-  (`func (u *UserController) Show(c *apphttp.Context, hash Hasher, cfg *config.Config)`,
+  (`func (a *AuthController) Register(c *apphttp.Context, guard *auth.Guard)`,
   wired up via `apphttp.Inject`, resolved by type from the service
   container), single-action (`Invokable`) controllers, and
   `Route::resource`/`apiResource`/`singleton` — reflection-based (a
-  controller need only implement the actions it has), with nested
-  (`"photos.comments"`) and `.Shallow()` routing, and
-  `.Only(...)`/`.Except(...)` filtering
+  controller need only implement the actions it has), with nested and
+  `.Shallow()` routing, and `.Only(...)`/`.Except(...)` filtering
 - A Laravel-standard response layer: handlers can optionally return a
   value (`apphttp.Responder`) instead of writing the response themselves —
   a string auto-sends as `text/html`, a struct/map/slice as JSON — and a
@@ -89,12 +88,20 @@ structs and interfaces instead of reflection-based magic.
   `storage/logs/`
 - A Laravel-style database layer: GORM/MySQL via `DatabaseServiceProvider`
   (bound as `"db"`, connection-pool tuned from `.env`), Eloquent-style
-  `app/Models` (a base `Model` plus a `User`/`Post` HasMany/BelongsTo
-  example), a self-registering `Migration` interface
+  `app/Models`, a self-registering `Migration` interface
   (`Up(db *gorm.DB) error` / `Down(db *gorm.DB) error`), and a
   batch-tracked `Runner` (`migrate/migrate:rollback` against a
   `migrations` table) — all driven by the `artisan` CLI
   (`go run artisan.go migrate|migrate:rollback|make:migration <name>`)
+- A full, working authentication system built on the above: a
+  session-based `auth.Guard` (`Register`/`Attempt`/`Login`/`Logout`/
+  `Check`/`User`), "remember me" persistent login (a 30-day cookie backed
+  by the persisted `encryption.Encrypter`, transparently re-establishing
+  a session via the `"auth"` middleware even with no session cookie
+  present at all), and password reset with single-use, time-limited
+  tokens — `AuthController` (`register`/`login`/`logout`/`forgot-password`/
+  `reset-password`/`me`) and `AuthServiceProvider` wire it all together;
+  see [docs/authentication.md](docs/authentication.md)
 
 ## Requirements
 
@@ -114,8 +121,16 @@ go run ./public/main.go
 In another terminal:
 
 ```bash
-curl -i http://127.0.0.1:8080/user
+curl -i http://127.0.0.1:8080/csrf-token
 ```
+
+`/register`, `/login`, `/logout`, `/me`, `/forgot-password`, and
+`/reset-password` need a real MySQL database migrated first (see
+[Database & migrations](#database--migrations) below) — everything else
+(routing, middleware, sessions, CSRF, encryption, hashing, validation,
+logging, error handling) works with zero external dependencies; see
+[docs/authentication.md](docs/authentication.md) for a full curl-based
+walkthrough of the auth flow.
 
 ### `.env`
 
@@ -162,14 +177,16 @@ Golite/
 ├── logging/          # Driver-based logging Manager (single/daily/stack channels)
 ├── database/
 │   └── migrations/   # Migration interface + self-registering migration files, Runner
+├── auth/             # Session-based Guard, remember-me, password reset
 ├── bootstrap/        # Application struct: wires everything together
 ├── app/
-│   ├── Providers/     # Service providers (Register/Boot), incl. DatabaseServiceProvider
-│   ├── Models/        # GORM models: base Model, User, Post
+│   ├── Providers/     # Service providers (Register/Boot), incl. Database/AuthServiceProvider
+│   ├── Models/        # GORM models: base Model, User
 │   ├── Exceptions/    # HttpException, abort()-style helpers, panic -> JSON rendering
 │   └── Http/
 │       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
 │       ├── Resource.go        # Route::resource/apiResource/singleton, Invokable controllers
+│       ├── Injection.go       # apphttp.Inject: Laravel-style method injection
 │       ├── Response.go        # Response factory, Responder/auto-conversion, macros, view rendering
 │       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken, cookies, files, Validate
 │       ├── Input.go           # Unified input payload (query + JSON/form body)
@@ -177,10 +194,9 @@ Golite/
 │       ├── UploadedFile.go    # Uploaded file handling
 │       ├── SessionBlock.go    # RouteDefinition.Block: atomic per-session locking
 │       ├── Session/           # Driver-based session engine (memory/file/cookie + custom drivers)
-│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, session, CSRF, panic-recovery & normalization middleware
-│       └── Controllers/       # Base Controller + route handlers (resource, nested, singleton, invokable demos)
+│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, session, CSRF, auth, panic-recovery & normalization middleware
+│       └── Controllers/       # Base Controller + AuthController
 ├── routes/           # Route definitions (routes/web.go)
-├── resources/views/  # html/template files for Response.View
 ├── docs/             # Full documentation (start at docs/README.md)
 └── public/           # Entry point (public/main.go)
 ```
@@ -191,8 +207,8 @@ Full framework documentation — architecture, the bootstrapping process, the
 request lifecycle, the service container, providers, routing, middleware,
 CSRF protection, HTTP request handling, controllers & resource routing,
 response handling, encryption, hashing, validation, error handling,
-logging, the database/ORM/migration layer, configuration, and a developer
-guide — lives in [`docs/`](docs/README.md).
+logging, the database/ORM/migration layer, authentication, configuration,
+and a developer guide — lives in [`docs/`](docs/README.md).
 
 ## Building and testing
 

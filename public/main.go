@@ -19,6 +19,7 @@ func main() {
 
 	app.Register(&providers.AppServiceProvider{})
 	app.Register(&providers.DatabaseServiceProvider{})
+	app.Register(&providers.AuthServiceProvider{}) // needs "db" + "hash", both bound above
 	app.Register(&providers.RouteServiceProvider{})
 
 	// Order matters: Recover must be outermost — its deferred recover()
