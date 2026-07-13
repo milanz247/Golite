@@ -6,7 +6,8 @@ conceptual background behind each of these, see:
 [request-lifecycle.md](request-lifecycle.md),
 [service-container.md](service-container.md),
 [service-providers.md](service-providers.md), [routing.md](routing.md),
-[middleware.md](middleware.md), [security-csrf.md](security-csrf.md),
+[middleware.md](middleware.md), [sessions.md](sessions.md),
+[security-csrf.md](security-csrf.md),
 [http-requests.md](http-requests.md), [controllers.md](controllers.md),
 [responses.md](responses.md), [configuration.md](configuration.md).
 
@@ -200,28 +201,49 @@ middleware struct straight from the service container via
 
 See [configuration.md](configuration.md#adding-a-new-config-value).
 
+### Attach a session to a route
+
+The `"session"` middleware name is already seeded into the `"web"` group by
+`NewKernel`, ahead of `"csrf"`; give it a real implementation once in
+`routes/web.go` and attach it to whichever routes call `c.Session()`
+(directly, or indirectly via `CsrfToken`/`Flash`/`Old`/a redirect's
+`.With`/`.WithInput`):
+
+```go
+kernel.AliasMiddleware("session", middleware.NewStartSession(kernel.Sessions()))
+
+kernel.GET("/session/visit", apphttp.Responder(func(c *apphttp.Context) any {
+    return map[string]any{"visits": c.Session().Increment("visits")}
+})).Middleware("session")
+```
+
+`c.Session()` panics with a clear message if `"session"` isn't attached to
+the matched route — it never creates one lazily. See
+[sessions.md](sessions.md) for the full `Session` API
+(`Get`/`Put`/`Push`/`Pull`/`Increment`/`Regenerate`/...), flash data,
+custom drivers, and `.Block()` for atomic per-session locking.
+
 ### Protect a route with CSRF
 
-The `"csrf"` middleware name is already seeded into the `"web"` group by
-`NewKernel`; give it a real implementation once in `routes/web.go` and
-attach it to whichever routes need it:
+The `"csrf"` middleware name is also seeded into the `"web"` group, right
+after `"session"` (CSRF needs one); give it a real implementation once in
+`routes/web.go` and attach both to whichever routes need it:
 
 ```go
 kernel.AliasMiddleware("csrf", middleware.NewVerifyCsrfToken("/stripe/*"))
 
 kernel.GET("/comments", func(c *apphttp.Context) {
     c.JSON(http.StatusOK, map[string]string{"csrf_token": c.CsrfToken()})
-}).Middleware("csrf")
+}).Middleware("session", "csrf")
 
-kernel.POST("/comments", handler).Middleware("csrf")
+kernel.POST("/comments", handler).Middleware("session", "csrf")
 ```
 
 The client must echo the token back via the `_token` form field,
 `X-CSRF-TOKEN`, or `X-XSRF-TOKEN` header on every `POST`/`PUT`/`PATCH`/
 `DELETE` to a CSRF-protected route, or the request gets a `419`. See
-[security-csrf.md](security-csrf.md) for the full mechanism, including the
-session it depends on and the `Except` wildcard exclusions for things like
-payment webhooks.
+[security-csrf.md](security-csrf.md) for the full mechanism and the
+`Except` wildcard exclusions for things like payment webhooks.
 
 ### Read request input, set a cookie, or handle a file upload
 
@@ -301,12 +323,19 @@ response macro via `apphttp.ResponseFactory.Macro(...)`.
   type-assertion based, on purpose — there's no reflection-based
   constructor injection like Laravel's automatic resolution. Keep bindings
   explicit.
-- **Sessions are in-memory and process-local**, with no expiry or
-  persistence. See [security-csrf.md](security-csrf.md#session-and-sessionstore).
+- **The default `"memory"` session driver is process-local**, with no
+  persistence across a restart; `"file"` and `"cookie"` are available for
+  more durable use cases, and `Manager.Extend` covers anything else
+  (Redis, a database). See [sessions.md](sessions.md).
+- **The stateless `"cookie"` session driver only reliably reflects a
+  mid-request session mutation for routes that don't themselves write a
+  response afterward** — a structural limitation of Go's
+  `http.ResponseWriter`, not a bug. Prefer `"memory"`/`"file"` otherwise.
+  See [sessions.md](sessions.md#the-stateless-cookie-driver-a-real-limitation).
 - **Cookie encryption key (`Kernel.appKey`) is also process-local** — a
   cookie set before a restart won't decrypt after one (`Context.Cookie`
-  returns `ErrInvalidCookie`, not a crash). Same tradeoff as sessions, for
-  the same reason. See [http-requests.md](http-requests.md#kernelappkey-generated-per-process-not-loaded-from-config).
+  returns `ErrInvalidCookie`, not a crash). Same tradeoff as the default
+  session driver, for the same reason. See [http-requests.md](http-requests.md#kernelappkey-generated-per-process-not-loaded-from-config).
 - **No request size limit beyond the 32 MiB passed to
   `ParseMultipartForm`.** Add your own (e.g. `http.MaxBytesReader` around
   `Request.Body`) ahead of anything that calls `File`/`All` if you're

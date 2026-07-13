@@ -418,12 +418,40 @@ Then register it either:
 - **through the container** — `kernel.Container().Bind("throttle", NewThrottle(limiter))`, then `.Middleware("throttle")`
 - as a **group member** — `kernel.MiddlewareGroup("api", "throttle", "auth")`
 
-## `VerifyCsrfToken`
+## `StartSessionMiddleware` and `VerifyCsrfToken`
 
-Golite's fifth example middleware, and its most involved: a
-parameterized-free but session-dependent struct that reads/writes cookies,
-compares a token in constant time, and exempts paths via a wildcard
-`Except` list. It's also seeded into the `"web"` middleware group by
-`NewKernel` itself, by name only, to avoid an import cycle. Full writeup,
-including a Go-specific cookie-ordering fix that was only caught by
-end-to-end testing, in [security-csrf.md](security-csrf.md).
+Both are seeded into the `"web"` middleware group by `NewKernel` itself, by
+name only (`"session"` then `"csrf"`), to avoid an import cycle —
+`routes/web.go` aliases each to a real instance.
+
+`StartSessionMiddleware` loads (or creates) the request's session before
+anything else in the `"web"` group runs, attaches it to `Context`, and
+saves it back afterward — full writeup, including a Go-specific
+cookie-ordering fix only caught by end-to-end testing, in
+[sessions.md](sessions.md).
+
+`VerifyCsrfToken` is a parameterized-free but session-dependent struct that
+reads/writes cookies, compares a token in constant time, and exempts paths
+via a wildcard `Except` list — the same cookie-ordering constraint applies
+here too. Full writeup in [security-csrf.md](security-csrf.md).
+
+## `RouteDefinition.WithMiddleware` — attaching a middleware *instance*, not just a name
+
+```go
+func (r *RouteDefinition) WithMiddleware(name string, mw Middleware, params ...string) *RouteDefinition
+```
+
+Every mechanism above (`Middleware`, groups, DI-through-the-container)
+resolves middleware **by name**, per request, via
+`Kernel.resolveRouteMiddleware`. `WithMiddleware` instead attaches an
+already-constructed `Middleware` value directly to one `RouteDefinition` —
+for middleware that carries its own route-specific configuration and so
+can't be a single reusable named alias. `RouteDefinition.Block(lockSeconds)`
+(see [sessions.md](sessions.md#session-blocking-block)) is the motivating
+example: each call needs its own timeout baked into the middleware
+instance. `WithMiddleware` entries are spliced into
+`resolveRouteMiddleware`'s output alongside the named ones, before priority
+sorting, so `name` still places them correctly relative to named middleware
+via `MiddlewarePriority`. `WithoutMiddleware` can't target them, though —
+it excludes by base name, and a `WithMiddleware` entry was never referenced
+by name in the first place; it bypasses name resolution entirely.

@@ -152,13 +152,14 @@ Unlike Laravel's `APP_KEY` (a config value meant to survive restarts and
 be shared across a deployment), Golite generates a fresh key with
 `crypto/rand` every time `NewKernel` runs. This is a deliberate, documented
 simplification, not an oversight — it's the same tradeoff already made for
-`SessionStore` (see [security-csrf.md](security-csrf.md#session-and-sessionstore)):
+the default `"memory"` session driver (see [sessions.md](sessions.md)):
 a lightweight, single-process framework with no persistence story yet is
 honestly served by a key that doesn't survive a restart, rather than a
 half-implemented "persistent" key that's actually just as ephemeral in
 practice. **Practical implication:** a cookie set before a restart won't
 decrypt after one — `Context.Cookie` returns `ErrInvalidCookie`, not a
-crash, so this fails safe.
+crash, so this fails safe. (This same `appKey` also encrypts the stateless
+`"cookie"` session driver's payload — see [sessions.md](sessions.md#the-handler-interface-and-built-in-drivers).)
 
 ## Flash data and `Old` input
 
@@ -179,35 +180,29 @@ kernel.POST("/contact", func(c *apphttp.Context) {
 		return
 	}
 	// ...
-}).Middleware("csrf")
+}).Middleware("session", "csrf")
 
 kernel.GET("/contact", func(c *apphttp.Context) {
 	c.JSON(http.StatusOK, map[string]string{
 		"old_email":  c.Old("email"),
 		"csrf_token": c.CsrfToken(),
 	})
-}).Middleware("csrf")
+}).Middleware("session", "csrf")
 ```
 
 ### One-shot semantics: visible on the *next* request, then gone
 
 Laravel's flash data survives for exactly one additional request, not
-indefinitely — `Session.ageFlashData` (in `Session.go`) implements the same
-two-bucket rotation Laravel's session middleware does:
+indefinitely — `Context.Flash`/`Old` are a thin, form-specific layer over
+the session engine's own `Flash`/`Get` (see
+[sessions.md](sessions.md#flash-data) for the full two-key-set rotation
+mechanism, `Session.ageFlash`, called once per request from
+`Manager.Load`).
 
-- `Context.Flash()` writes into a `"new"` bucket.
-- `Session.ageFlashData()`, called exactly once per request (from
-  `Context.Session`, guarded by the same `c.session != nil` check that
-  already makes `Session()` idempotent within one request), discards
-  whatever was in the `"old"` bucket and promotes `"new"` → `"old"`.
-- `Context.Old()` reads only the `"old"` bucket.
-
-So data flashed on request *N* is invisible on *N* itself (it's sitting in
-`"new"`), becomes readable via `Old()` on request *N+1* (now promoted to
-`"old"`), and is gone by *N+2* (discarded when *N+1*'s own aging step
-runs). Verified directly: flashing a value, reading it back on the
-immediately following request, then confirming a third request no longer
-sees it.
+So data flashed on request *N* is invisible on *N* itself, becomes readable
+via `Old()` on request *N+1*, and is gone by *N+2*. Verified directly:
+flashing a value, reading it back on the immediately following request,
+then confirming a third request no longer sees it.
 
 `Old` returns a `string` (matching its exact signature), so `Flash`
 stringifies each input value first — a plain `string` passes through, a
@@ -363,8 +358,8 @@ header isn't validated first.
 
 - **`Kernel.appKey` doesn't survive a restart** — see
   [above](#kernelappkey-generated-per-process-not-loaded-from-config).
-  Same tradeoff as `SessionStore`; both are documented, both fail safe
-  rather than silently.
+  Same tradeoff as the default `"memory"` session driver; both are
+  documented, both fail safe rather than silently.
 - **No request size limits beyond the 32 MiB passed to
   `ParseMultipartForm`.** A production deployment fielding untrusted
   uploads should add its own limit (e.g. wrapping `Request.Body` in
@@ -377,5 +372,5 @@ header isn't validated first.
   a human would pick first.
 
 See [middleware.md](middleware.md) for how these fit into the middleware
-pipeline generally, and [security-csrf.md](security-csrf.md) for the
-session mechanism `Flash`/`Old`/`CsrfToken` all share.
+pipeline generally, and [sessions.md](sessions.md) for the session engine
+`Flash`/`Old`/`CsrfToken` all build on.

@@ -7,7 +7,8 @@
 - [Service Providers](service-providers.md) — the `Register`/`Boot` contract, writing your own provider
 - [Routing](routing.md) — the regex route engine: verbs, parameters, `where*` constraints, named routes & URL generation, groups, redirects, fallback, 405 handling
 - [Middleware](middleware.md) — global/route/grouped middleware registries, priority sorting, parameterized middleware, `WithoutMiddleware`, terminable middleware, container-resolved DI
-- [CSRF Protection](security-csrf.md) — the session mechanism, `Context.CsrfToken()`, `VerifyCsrfToken`, wildcard exclusions, the `XSRF-TOKEN` cookie
+- [Sessions](sessions.md) — the driver-based `Handler`/`Manager`, `StartSessionMiddleware`, the full `Session` API, flash data, `Regenerate`/`Invalidate`, custom drivers, and `.Block()` for atomic session locking
+- [CSRF Protection](security-csrf.md) — `Context.CsrfToken()`, `VerifyCsrfToken`, wildcard exclusions, the `XSRF-TOKEN` cookie
 - [HTTP Request Handling](http-requests.md) — request inspection helpers, the unified input payload, encrypted cookies, flash/old input, file uploads, `TrimStrings`/`ConvertEmptyStringsToNull`/`TrustProxies`/`TrustHosts`
 - [Controllers & Resource Routing](controllers.md) — the base `Controller`, constructor DI, invokable controllers, `Route::resource`/`apiResource`, nested + shallow resources, singleton resources
 - [HTTP Response Handling](responses.md) — dynamic return-type serialization, the fluent `Response` factory, redirects with flash data, `Json`/`View`/`Download`/`File`/`StreamDownload`, response macros

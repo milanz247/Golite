@@ -31,12 +31,22 @@ Golite/
 │       ├── Input.go                  # Unified input payload: All/Input/Query/Has/Only/Except/Boolean/Merge
 │       ├── Cookie.go                 # AES-256-GCM cookie encryption primitives
 │       ├── UploadedFile.go           # UploadedFile: IsValid/Path/Extension/Store/StoreAs
-│       ├── Session.go                # Session, SessionStore — in-memory, crypto/rand-backed
+│       ├── SessionBlock.go           # RouteDefinition.Block: per-session locking, coordinated w/ StartSessionMiddleware
+│       ├── Session/                  # Driver-based session engine (own package: avoids an app/Http import cycle)
+│       │   ├── SessionHandler.go         # Handler interface (PHP's SessionHandlerInterface, adapted)
+│       │   ├── SessionManager.go         # Manager: driver registry, Load/Save, Extend, per-ID Lock
+│       │   ├── Session.go                # Session: Get/Put/Push/Pull/Increment/Flash/Regenerate/...
+│       │   ├── MemorySessionHandler.go   # Default driver: concurrent-safe in-memory map
+│       │   ├── FileSessionHandler.go     # storage/sessions/*.json, one file per session
+│       │   ├── CookieSessionHandler.go   # Stateless driver: payload lives in the cookie itself
+│       │   ├── Lock.go                   # Per-session-ID *sync.Mutex registry (TryLock-polled, timeout-bounded)
+│       │   └── crypto.go                 # AES-256-GCM + ID generation, duplicated from Cookie.go to avoid the cycle
 │       ├── Middleware/
 │       │   ├── LoggerMiddleware.go          # Global, "after"-style middleware
 │       │   ├── MethodSpoofingMiddleware.go  # Global, "before"-style: PUT/PATCH/DELETE spoofing for HTML forms
 │       │   ├── RoleMiddleware.go            # Parameterized, struct-based (e.g. "role:editor,admin")
 │       │   ├── AuditMiddleware.go           # Terminable: Handle + Terminate, DI-resolvable via the container
+│       │   ├── StartSessionMiddleware.go    # Attaches a Session to every request; saves it back afterward
 │       │   ├── VerifyCsrfToken.go           # CSRF protection: session-bound token, Except wildcards, XSRF-TOKEN cookie
 │       │   ├── TrimStringsMiddleware.go             # Trims whitespace from every input string
 │       │   ├── ConvertEmptyStringsToNullMiddleware.go # "" input values -> nil, key kept
@@ -70,7 +80,7 @@ Golite/
 | `app/Http/Resource.go`                    | `Illuminate\Routing\ResourceRegistrar` / `PendingResourceRegistration` |
 | `app/Http/Response.go` (`Response`)       | `Illuminate\Http\Response` / `RedirectResponse` |
 | `app/Http/Context.go` (`Context`)         | `Illuminate\Http\Request` + response helpers |
-| `app/Http/Session.go`                     | `Illuminate\Session\Store` + a driver        |
+| `app/Http/Session/` (`Manager`, `Session`, `Handler`) | `Illuminate\Session\SessionManager` + `Store` + a driver |
 | `resources/views/*.html`                  | `resources/views/*.blade.php`                |
 | `app/Http/Middleware/*.go`                | `app/Http/Middleware/*.php`                  |
 | `app/Http/Controllers/Controller.go`      | `Illuminate\Routing\Controller`              |
@@ -128,6 +138,17 @@ Golite/
   `Terminate` through the (per-request, goroutine-safe) `Context` instead —
   see `AuditMiddleware` and
   [middleware.md](middleware.md#terminable-middleware).
+- **`RouteDefinition.WithMiddleware` attaches a concrete `Middleware`
+  instance directly to a route, bypassing name-based resolution.**
+  `.Block()` needs this: each call carries its own route-specific
+  configuration (the lock timeout), so it can't be a reusable named
+  singleton the way `.Middleware("auth")` aliases are. `WithMiddleware`
+  entries are spliced into `resolveRouteMiddleware`'s output alongside the
+  named ones, before priority sorting, so `MiddlewarePriority` still places
+  them correctly — but `WithoutMiddleware` can't target them, since they
+  bypass name resolution entirely. See
+  [middleware.md](middleware.md#routedefinitionwithmiddleware--attaching-a-middleware-instance-not-just-a-name)
+  and [sessions.md](sessions.md#session-blocking-block).
 - **`VerifyCsrfToken` sets its cookie *before* calling `next()`, not after,
   unlike Laravel.** Laravel adds the `XSRF-TOKEN` cookie once
   `$next($request)` returns, because PHP's `Response` stays a mutable
@@ -146,19 +167,38 @@ Golite/
   forget to implement) the same validation. See
   [http-requests.md](http-requests.md#ip-is-deliberately-dumb--trustproxiesmiddleware-is-what-makes-it-safe).
 - **`Kernel.appKey` (cookie encryption) is generated fresh every process
-  restart, like `SessionStore`.** Golite is a single-process, no-persistence
-  framework today; a key that doesn't survive a restart is an honest
-  reflection of that rather than a half-real "persistent" key. Decryption
-  failure (including from a stale pre-restart cookie) returns
-  `ErrInvalidCookie`, not a panic — it fails safe. See
+  restart, like the default `"memory"` session driver.** Golite is a
+  single-process framework today, and the `"file"`/custom-driver options
+  exist for anyone who needs persistence; a key that doesn't survive a
+  restart is an honest reflection of the default rather than a half-real
+  "persistent" key. Decryption failure (including from a stale pre-restart
+  cookie) returns `ErrInvalidCookie`, not a panic — it fails safe. See
   [http-requests.md](http-requests.md#kernelappkey-generated-per-process-not-loaded-from-config).
-- **Flash data ages in exactly one hook, `Context.Session()`, guarded by
-  the same idempotency check that already makes `Session()` safe to call
-  more than once per request.** This is what gives `Flash`/`Old` Laravel's
-  real one-request-only visibility (verified directly: readable on request
-  *N+1*, gone by *N+2*) without a separate "start of request" hook the
-  Kernel would otherwise need to call explicitly. See
-  [http-requests.md](http-requests.md#one-shot-semantics-visible-on-the-next-request-then-gone).
+- **`StartSessionMiddleware` queues the session cookie *before* `next()`
+  runs, not after — the same Go-specific header-ordering constraint
+  `VerifyCsrfToken` hit, but this time not optional to work around, since a
+  session that never sends its cookie never persists at all.** Caught the
+  same way: live end-to-end testing showed the cookie simply never reached
+  the browser. Regenerate/Invalidate need the client to see a *new* ID in
+  the same response, which the early-queued cookie can't reflect on its
+  own — solved with `Context.RegenerateSession`/`InvalidateSession`, which
+  update the already-queued cookie in place from inside the handler, before
+  it writes its own response. See
+  [sessions.md](sessions.md#a-go-specific-cookie-ordering-fix-the-same-class-of-bug-csrf-hit).
+- **`RouteDefinition.Block()` reloads the session under its lock, not just
+  the save.** The first version only serialized the *save*, leaving the
+  *load* (done earlier by `StartSessionMiddleware`, with no lock available
+  yet) racy — concurrent requests each mutated their own stale snapshot,
+  and the lock just serialized the overwrites. Caught with a concurrency
+  stress test (10 concurrent requests pushing to the same session's cart
+  dropped 6 of them); fixed by reloading from the driver once the lock is
+  actually held. See
+  [sessions.md](sessions.md#why-blocking-has-to-reload-the-session-not-just-serialize-the-save).
+- **Flash data ages in exactly one hook, `Manager.Load`, called once per
+  request by `StartSessionMiddleware` before the handler runs.** This is
+  what gives `Flash`/`Old` Laravel's real one-request-only visibility
+  (verified directly: readable on request *N+1*, gone by *N+2*). See
+  [sessions.md](sessions.md#flash-data).
 - **`Route::resource`'s "automatically inspect the controller" is real
   reflection, not a required interface.** A controller doesn't implement
   some `ResourceController` interface covering all 7 actions — `reflect`

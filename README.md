@@ -28,11 +28,18 @@ structs and interfaces instead of reflection-based magic.
   `_method` or `X-HTTP-Method-Override`, for plain HTML forms),
   `RoleMiddleware` (parameterized), and `AuditMiddleware` (terminable) as
   worked examples
-- An in-memory, `crypto/rand`-backed session store (`Context.Session()`)
-  and Laravel-style CSRF protection: `Context.CsrfToken()`,
-  `VerifyCsrfToken` middleware (checked against the `_token` field,
-  `X-CSRF-TOKEN`, or `X-XSRF-TOKEN`, in constant time), wildcard `Except`
-  path exclusions, and an auto-synced `XSRF-TOKEN` cookie for Axios/Angular
+- A driver-based session engine (`"memory"`/`"file"`/`"cookie"`, plus
+  `Manager.Extend` for Redis/database/custom drivers), attached to every
+  request by `StartSessionMiddleware`: a full expressive `Session` API
+  (`Get`/`Put`/`Push`/`Pull`/`All`/`Has`/`Exists`/`Missing`/`Increment`/
+  `Decrement`/`Forget`/`Flush`), one-shot flash data (`Flash`/`Now`/
+  `Reflash`/`Keep`), fixation-safe `Regenerate`/`Invalidate`, and
+  `.Block()` for atomic per-session locking against concurrent requests
+- Laravel-style CSRF protection built on the session engine:
+  `Context.CsrfToken()`, `VerifyCsrfToken` middleware (checked against the
+  `_token` field, `X-CSRF-TOKEN`, or `X-XSRF-TOKEN`, in constant time),
+  wildcard `Except` path exclusions, and an auto-synced `XSRF-TOKEN` cookie
+  for Axios/Angular
 - A full Laravel-style request API on `Context`: inspection helpers
   (`Path`/`Is`/`Url`/`FullUrl`/`Method`/`Ip`/`BearerToken`/`ExpectsJson`), a
   unified input payload merging query/JSON/form data (`All`/`Input`/`Query`/
@@ -112,8 +119,9 @@ Golite/
 │       ├── Input.go           # Unified input payload (query + JSON/form body)
 │       ├── Cookie.go          # AES-256-GCM cookie encryption
 │       ├── UploadedFile.go    # Uploaded file handling
-│       ├── Session.go         # In-memory SessionStore (crypto/rand-backed tokens)
-│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, CSRF & normalization middleware
+│       ├── SessionBlock.go    # RouteDefinition.Block: atomic per-session locking
+│       ├── Session/           # Driver-based session engine (memory/file/cookie + custom drivers)
+│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, session, CSRF & normalization middleware
 │       └── Controllers/       # Base Controller + route handlers (resource, nested, singleton, invokable demos)
 ├── routes/           # Route definitions (routes/web.go)
 ├── resources/views/  # html/template files for Response.View

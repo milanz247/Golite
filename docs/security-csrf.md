@@ -1,6 +1,6 @@
 # CSRF Protection
 
-Files: [`app/Http/Session.go`](../app/Http/Session.go),
+Files: [`app/Http/Session/`](../app/Http/Session/),
 [`app/Http/Context.go`](../app/Http/Context.go),
 [`app/Http/Middleware/VerifyCsrfToken.go`](../app/Http/Middleware/VerifyCsrfToken.go),
 [`app/Http/Kernel.go`](../app/Http/Kernel.go)
@@ -16,53 +16,29 @@ checks it on state-changing requests, wildcard path exclusions, and an
 A CSRF token only works if it's tied to something that persists across
 requests from the same browser — issue a fresh token on every request and
 there's nothing for a subsequent `POST` to match against. Laravel's token
-lives on `$request->session()->token()`; Golite needed the same foundation,
-so this feature also introduces Golite's first session mechanism.
-
-### `Session` and `SessionStore`
+lives on `$request->session()->token()`; Golite's equivalent is
+`c.Session().Token()`, backed by the full driver-based session engine
+documented in [sessions.md](sessions.md) — CSRF just needs
+`StartSessionMiddleware` active on the same route:
 
 ```go
-type Session struct {
-	ID string
-	// ...
-}
-
-func (s *Session) Get(key string) string
-func (s *Session) Put(key, value string)
-func (s *Session) Token() string // generates + persists a token on first call
-
-type SessionStore struct { /* ... */ }
-
-func NewSessionStore() *SessionStore
+kernel.GET("/comments", handler).Middleware("session", "csrf")
+kernel.POST("/comments", handler).Middleware("session", "csrf")
 ```
-
-`SessionStore` is a thread-safe, **in-memory** map of session ID →
-`*Session` — Golite's minimal equivalent of Laravel's session driver
-abstraction (`file`/`database`/`redis`/...). `Session.Token()` generates a
-32-byte `crypto/rand` value, base64url-encodes it, and stores it once per
-session (a second call returns the same token; a losing side of a
-first-request race keeps whichever token was stored first, so concurrent
-requests for a brand-new session always agree).
-
-> **Limitation:** sessions live only in process memory and are lost on
-> restart, and there's no expiry/garbage collection. Fine for a single
-> lightweight-framework process; a real deployment needing persistence or
-> multi-instance sharing would swap `SessionStore` for one backed by
-> Redis/a database, without changing `Context.Session()`'s API.
 
 ### `Context.Session()` and `Context.CsrfToken()`
 
 ```go
-func (c *Context) Session() *Session
+func (c *Context) Session() *gosession.Session
 func (c *Context) CsrfToken() string
 ```
 
-`Context.Session()` reads the `golite_session` cookie, looks the ID up in
-the kernel's `SessionStore`, and **creates a new session** (queuing a
-`Set-Cookie` for it) if the cookie is missing or unknown. The result is
-cached on the `Context`, so repeated calls within one request are cheap and
-consistent. `CsrfToken()` is just `Session().Token()` — use it to render a
-hidden field or meta tag:
+`Context.Session()` returns the session `StartSessionMiddleware` already
+attached before any route handler runs — it does **not** create one lazily,
+and panics if the middleware isn't active on the matched route (see
+[sessions.md](sessions.md) for why, and for the full `Session` API).
+`CsrfToken()` is just `Session().Token()` — use it to render a hidden field
+or meta tag:
 
 ```go
 kernel.GET("/comments", func(c *apphttp.Context) {
@@ -70,12 +46,14 @@ kernel.GET("/comments", func(c *apphttp.Context) {
 	// in an HTML-rendering handler, this would instead be something like:
 	//   <input type="hidden" name="_token" value="{{ c.CsrfToken() }}">
 	//   <meta name="csrf-token" content="{{ c.CsrfToken() }}">
-})
+}).Middleware("session", "csrf")
 ```
 
 The session cookie itself is `HttpOnly`, `SameSite=Lax`, and `Secure` when
-the request is (or is reported by a trusted proxy to be) HTTPS — see
-`IsSecureRequest` in `Session.go`.
+the request is (or is reported by a trusted proxy to be) HTTPS — set by
+`StartSessionMiddleware`, which had to work around its own Go-specific
+header-ordering pitfall to make this cookie actually reach the browser; see
+[sessions.md](sessions.md#a-go-specific-cookie-ordering-fix-the-same-class-of-bug-csrf-hit).
 
 ## `VerifyCsrfToken`
 
@@ -92,8 +70,8 @@ Registered like any other [middleware](middleware.md):
 ```go
 kernel.AliasMiddleware("csrf", middleware.NewVerifyCsrfToken("/stripe/*", "/api/v1/webhooks"))
 
-kernel.GET("/comments", handler).Middleware("csrf")
-kernel.POST("/comments", handler).Middleware("csrf")
+kernel.GET("/comments", handler).Middleware("session", "csrf")
+kernel.POST("/comments", handler).Middleware("session", "csrf")
 ```
 
 `Handle` does, in order:
@@ -186,38 +164,40 @@ on the session, never on anything the downstream handler does.
 ```go
 // Kernel.go, inside NewKernel:
 MiddlewareGroups: map[string][]string{
-	"web": {"csrf"},
+	"web": {"session", "csrf"},
 },
 ```
 
-`NewKernel` seeds the `"web"` group with the *name* `"csrf"` by default,
-mirroring Laravel's `Kernel.php`, which always includes
-`VerifyCsrfToken::class` in `$middlewareGroups['web']`. `app/Http/Kernel.go`
-can't reference the concrete `VerifyCsrfToken` type directly — `Middleware`
+`NewKernel` seeds the `"web"` group with the *names* `"session"` then
+`"csrf"` by default, mirroring Laravel's `Kernel.php`, which always includes
+`StartSession::class` and `VerifyCsrfToken::class` (in that order) in
+`$middlewareGroups['web']`. `app/Http/Kernel.go` can't reference the
+concrete `StartSession`/`VerifyCsrfToken` types directly — `Middleware`
 already imports `app/Http`, so the reverse import would be a cycle — so
-the kernel only pre-registers the *name*; the name does nothing until
+the kernel only pre-registers the *names*; neither does anything until
 something aliases it to a real implementation, which
 [`routes/web.go`](../routes/web.go) does:
 
 ```go
+kernel.AliasMiddleware("session", middleware.NewStartSession(kernel.Sessions()))
 kernel.AliasMiddleware("csrf", middleware.NewVerifyCsrfToken("/stripe/*", "/api/v1/webhooks"))
 ```
 
-`kernel.MiddlewarePriority` also puts `"csrf"` first, ahead of `"auth"` /
-`"role"` / `"audit"`, so it always runs before anything that might depend
-on session state, regardless of the order middleware is assigned on a
-route or pulled in via a group.
+`kernel.MiddlewarePriority` puts `"session"` first, then `"csrf"`, ahead of
+`"auth"` / `"role"` / `"audit"`, so a session is always attached before
+anything that might depend on it, regardless of the order middleware is
+assigned on a route or pulled in via a group.
 
 ## The demo in `routes/web.go`
 
 ```go
 kernel.GET("/comments", func(c *apphttp.Context) {
 	c.JSON(http.StatusOK, map[string]string{"csrf_token": c.CsrfToken()})
-}).Middleware("csrf").Name("comments.form")
+}).Middleware("session", "csrf").Name("comments.form")
 
-kernel.POST("/comments", resourceHandler("comments.store")).Middleware("csrf").Name("comments.store")
+kernel.POST("/comments", resourceHandler("comments.store")).Middleware("session", "csrf").Name("comments.store")
 
-kernel.POST("/stripe/webhook", resourceHandler("stripe.webhook")).Middleware("csrf").Name("stripe.webhook")
+kernel.POST("/stripe/webhook", resourceHandler("stripe.webhook")).Middleware("session", "csrf").Name("stripe.webhook")
 ```
 
 The intended flow, verified end to end with a cookie jar:
@@ -246,11 +226,13 @@ The intended flow, verified end to end with a cookie jar:
   attacker's problem is *sending* the cookie value cross-site, not reading
   it), but worth knowing if you're comparing feature-for-feature against
   Laravel.
-- **No CSRF token rotation on login/logout.** Laravel regenerates the
-  session (and therefore the token) on authentication changes to prevent
-  session fixation; Golite has no auth/session-lifecycle integration yet,
-  so a session's token is stable for its entire (in-memory,
-  process-lifetime) existence.
+- **No CSRF token rotation coupled to authentication.** Golite's session
+  engine does support regeneration (`c.RegenerateSession()`, which rotates
+  the session ID and — since the token lives inside the session's own
+  values — implicitly invalidates the old token too; see
+  [sessions.md](sessions.md#regenerate-and-invalidate-need-a-context-level-wrapper)),
+  but there's no built-in auth system yet to call it automatically on
+  login/logout — a hand-rolled login handler needs to call it itself.
 - See [routing.md](routing.md) and [middleware.md](middleware.md) for how
   `Except`'s wildcard matching and the `"csrf"` alias/group wiring relate
   to the rest of the routing and middleware systems.

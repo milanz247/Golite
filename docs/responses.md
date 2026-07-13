@@ -133,24 +133,26 @@ func (r *Response) WithInput() *Response                  // flash the current i
 ```
 
 Both are only meaningful on a redirect response — `Response.Send`'s
-`kindRedirect` branch applies them (writing into the session) **before**
-calling `http.Redirect`, for the same reason
-[`VerifyCsrfToken` sets its cookie before calling `next()`](security-csrf.md#the-xsrf-token-cookie-and-a-go-specific-ordering-fix):
-a brand-new session's `Set-Cookie` header (queued by `Context.Session`,
-which flash-writing triggers) has to be set before anything calls
-`WriteHeader`, and `http.Redirect` does exactly that.
+`kindRedirect` branch applies them (writing into the session, via
+`Session.Flash`) **before** calling `http.Redirect`. This needs a session
+already attached (`.Middleware("session")` on the route, directly or via a
+group), and matters for the same Go-specific reason
+[`StartSessionMiddleware` queues its cookie before `next()`](sessions.md#a-go-specific-cookie-ordering-fix-the-same-class-of-bug-csrf-hit)
+and [`VerifyCsrfToken` sets its cookie before calling `next()`](security-csrf.md#the-xsrf-token-cookie-and-a-go-specific-ordering-fix):
+`http.Redirect` calls `WriteHeader`, so anything that needs to land in the
+session has to happen before it runs, not after.
 
 `With` reuses the **same** one-shot flash mechanism as `Context.Flash`/
-`Old` (`Session.flashPut`/`flashGet` — see
-[http-requests.md](http-requests.md#one-shot-semantics-visible-on-the-next-request-then-gone))
-— a message flashed via `.With("message", "Success!")` is read back with
-`c.Old("message")`, exactly like flashed form input. This mirrors how
-Laravel actually implements both on the same underlying session flash
-bucket; the practical consequence is that a `.With("email", ...)` message
-and a form field literally named `email` share the same flash key —
-matching Laravel's own behavior, not a Golite-specific quirk. Verified
-directly: a message flashed via `.With` is readable via `Old` on the
-*next* request and gone by the one after that.
+`Old` (`Session.Flash`/`Get` — see
+[sessions.md](sessions.md#flash-data)) — a message flashed via
+`.With("message", "Success!")` is read back with `c.Old("message")`,
+exactly like flashed form input. This mirrors how Laravel actually
+implements both on the same underlying session flash bucket; the practical
+consequence is that a `.With("email", ...)` message and a form field
+literally named `email` share the same flash key — matching Laravel's own
+behavior, not a Golite-specific quirk. Verified directly: a message flashed
+via `.With` is readable via `Old` on the *next* request and gone by the one
+after that.
 
 ## Specialized response formats
 
