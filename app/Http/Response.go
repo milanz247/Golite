@@ -345,7 +345,7 @@ func (r *Response) applyFlash(c *Context) {
 	if len(r.flashData) > 0 {
 		sess := c.Session()
 		for key, value := range r.flashData {
-			sess.flashPut(key, stringifyInputValue(value))
+			sess.Flash(key, value)
 		}
 	}
 	if r.flashInput {

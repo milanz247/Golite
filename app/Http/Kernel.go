@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	gosession "Golite/app/Http/Session"
 	"Golite/container"
 )
 
@@ -56,8 +57,10 @@ type TerminableMiddleware interface {
 }
 
 // Context itself — its struct definition, constructor, and methods
-// (including Session/CsrfToken) — lives in Context.go; Session/SessionStore
-// live in Session.go. Both are part of this same package.
+// (including Session/CsrfToken) — lives in Context.go; the session engine
+// itself (Session, Manager, drivers) lives in the sibling
+// app/Http/Session package, and RouteDefinition.Block (below) lives in
+// SessionBlock.go.
 
 // ---------------------------------------------------------------------------
 // Middleware spec parsing and name normalization shared by RouteDefinition,
@@ -125,13 +128,14 @@ type RouteDefinition struct {
 
 	namePrefix string // captured from the enclosing group(s) at creation time
 
-	mu              sync.RWMutex
-	name            string
-	wheres          map[string]string // param name -> regex constraint
-	defaults        map[string]string // param name -> fallback value
-	middlewareNames []string          // group middleware (at creation) + per-route middleware, as raw specs
-	withoutNames    map[string]bool   // base middleware names excluded for this route specifically
-	regex           *regexp.Regexp
+	mu               sync.RWMutex
+	name             string
+	wheres           map[string]string       // param name -> regex constraint
+	defaults         map[string]string       // param name -> fallback value
+	middlewareNames  []string                // group middleware (at creation) + per-route middleware, as raw specs
+	withoutNames     map[string]bool         // base middleware names excluded for this route specifically
+	directMiddleware []directMiddlewareEntry // attached by name-less value — see WithMiddleware
+	regex            *regexp.Regexp
 }
 
 var paramNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -345,6 +349,40 @@ func (r *RouteDefinition) withoutMiddlewareCopy() map[string]bool {
 	for k := range r.withoutNames {
 		out[k] = true
 	}
+	return out
+}
+
+// directMiddlewareEntry pairs a concrete Middleware value (as opposed to
+// a name resolved later via RouteMiddleware/MiddlewareGroups/the
+// container) with a label used only for MiddlewarePriority sorting, and
+// any parameters to pass it. See RouteDefinition.WithMiddleware.
+type directMiddlewareEntry struct {
+	name   string
+	mw     Middleware
+	params []string
+}
+
+// WithMiddleware attaches a concrete Middleware instance directly to this
+// route, bypassing the RouteMiddleware/MiddlewareGroups name-resolution
+// system entirely — used by RouteDefinition.Block, and available for any
+// case where a middleware instance is constructed with route-specific
+// configuration (a timeout, a limit, ...) rather than being a reusable,
+// aliasable singleton. name only affects where MiddlewarePriority sorts
+// it relative to named middleware; unlike a named one, it can't be
+// targeted by WithoutMiddleware, since it was never referenced by name in
+// the first place.
+func (r *RouteDefinition) WithMiddleware(name string, mw Middleware, params ...string) *RouteDefinition {
+	r.mu.Lock()
+	r.directMiddleware = append(r.directMiddleware, directMiddlewareEntry{name: name, mw: mw, params: params})
+	r.mu.Unlock()
+	return r
+}
+
+func (r *RouteDefinition) directMiddlewareCopy() []directMiddlewareEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]directMiddlewareEntry, len(r.directMiddleware))
+	copy(out, r.directMiddleware)
 	return out
 }
 
@@ -623,19 +661,22 @@ type Kernel struct {
 	// serving requests.
 	MiddlewarePriority []string
 
-	sessions *SessionStore
+	// sessionManager loads/saves sessions for StartSessionMiddleware and
+	// backs RouteDefinition.Block's locking — see Sessions and Kernel.go's
+	// "Session integration" note above NewKernel.
+	sessionManager *gosession.Manager
 
 	// appKey encrypts/authenticates cookies set via Context.SetCookie and
-	// read via Context.Cookie (AES-256-GCM). It's generated fresh with
+	// read via Context.Cookie (AES-256-GCM), and — via sessionManager — the
+	// "cookie" session driver's payloads. It's generated fresh with
 	// crypto/rand every time NewKernel runs, rather than loaded from
-	// config, for the same reason Golite's SessionStore is in-memory only
-	// (see Session.go): this is a lightweight, single-process framework
-	// with no persistence story yet, so a key that doesn't survive a
-	// restart is an honest reflection of that, not a workaround. A
-	// deployment needing encrypted cookies to survive restarts (or to be
-	// shared across instances) would load this from a persistent secret
-	// instead — see docs/security-csrf.md for the equivalent tradeoff
-	// already documented for sessions.
+	// config: this is a lightweight, single-process framework with no
+	// persistence story yet, so a key that doesn't survive a restart is an
+	// honest reflection of that, not a workaround. A deployment needing
+	// encrypted cookies (or "cookie"-driver sessions) to survive restarts,
+	// or to be shared across instances, would load this from a persistent
+	// secret instead — see docs/security-csrf.md for the equivalent
+	// tradeoff already documented for the in-memory session driver.
 	appKey []byte
 
 	routes      []*RouteDefinition
@@ -644,27 +685,35 @@ type Kernel struct {
 }
 
 // NewKernel creates a Kernel bound to the given service container. The
-// "web" middleware group is seeded with "csrf" by default — mirroring
-// Laravel's own Kernel.php, which always includes VerifyCsrfToken in its
-// $middlewareGroups['web'] — though the "csrf" name only does anything
-// once something registers it, e.g. via
-// kernel.AliasMiddleware("csrf", middleware.NewVerifyCsrfToken(...)) in
-// routes/web.go; Kernel.go itself can't reference that concrete type
+// "web" middleware group is seeded with "session" then "csrf" by default
+// — mirroring Laravel's own Kernel.php, which always includes StartSession
+// and VerifyCsrfToken in its $middlewareGroups['web'], in that order,
+// since CSRF verification needs a session to check the token against —
+// though those names only do anything once something registers a real
+// implementation under them, e.g. via
+// kernel.AliasMiddleware("session", middleware.NewStartSession(kernel.Sessions()))
+// in public/main.go; Kernel.go itself can't reference that concrete type
 // without an import cycle (app/Http/Middleware already imports app/Http).
 // The same constraint means Kernel.go can't pre-register the
 // normalization/trust middleware (TrimStrings, ConvertEmptyStringsToNull,
 // TrustProxies, TrustHosts) into GlobalMiddleware either — they're wired
 // up in public/main.go instead, which already imports both packages.
+//
+// A session manager is always created (the "memory" driver, sufficient
+// for a single-process deployment — see docs/sessions.md for switching
+// drivers via Sessions().Driver/Extend), using appKey for its "cookie"
+// driver even if that driver is never activated.
 func NewKernel(c *container.Container) *Kernel {
+	appKey := generateAppKey()
 	k := &Kernel{
 		container:       c,
 		RouteMiddleware: make(map[string]Middleware),
 		MiddlewareGroups: map[string][]string{
-			"web": {"csrf"},
+			"web": {"session", "csrf"},
 		},
-		namedRoutes: make(map[string]*RouteDefinition),
-		sessions:    NewSessionStore(),
-		appKey:      generateAppKey(),
+		namedRoutes:    make(map[string]*RouteDefinition),
+		appKey:         appKey,
+		sessionManager: gosession.NewManager("golite_session", 7200, appKey), // 7200s = 120 minutes, Laravel's own default
 	}
 	setDefaultKernel(k)
 	return k
@@ -678,12 +727,12 @@ func (k *Kernel) Container() *container.Container {
 	return k.container
 }
 
-// Sessions returns the kernel's session store. Most code should go through
-// Context.Session()/Context.CsrfToken() instead; this exists for the rare
-// case something outside a request (a scheduled job, a test) needs direct
-// access.
-func (k *Kernel) Sessions() *SessionStore {
-	return k.sessions
+// Sessions returns the kernel's session manager — for switching the
+// active driver (Driver), registering a custom one (Extend), or wiring up
+// StartSessionMiddleware in public/main.go. Application code handling a
+// request should go through Context.Session() instead.
+func (k *Kernel) Sessions() *gosession.Manager {
+	return k.sessionManager
 }
 
 // UseMiddleware registers one or more global middleware, executed on every
@@ -812,6 +861,14 @@ func (k *Kernel) resolveRouteMiddleware(route *RouteDefinition) []resolvedMiddle
 			continue // unresolved middleware name: silently skipped
 		}
 		resolved = append(resolved, resolvedMiddleware{name: name, mw: mw, params: params})
+	}
+
+	// Directly-attached middleware (RouteDefinition.WithMiddleware, e.g.
+	// from .Block()) bypasses name resolution and WithoutMiddleware
+	// entirely — it was never referenced by name — but still
+	// participates in priority sorting below.
+	for _, entry := range route.directMiddlewareCopy() {
+		resolved = append(resolved, resolvedMiddleware{name: entry.name, mw: entry.mw, params: entry.params})
 	}
 
 	k.sortByPriority(resolved)
@@ -1071,7 +1128,7 @@ func (k *Kernel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	chain = append(chain, k.dispatch)
 
-	ctx := newContext(w, r, k.container, k.sessions, k.appKey, chain)
+	ctx := newContext(w, r, k.container, k.appKey, k.sessionManager, chain)
 	ctx.Next()
 
 	k.terminate(ctx)

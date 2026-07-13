@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"net/http"
+	"strings"
 )
 
 // ErrInvalidCookie is returned by Context.Cookie when the named cookie is
@@ -81,4 +83,18 @@ func decryptCookieValue(key []byte, encoded string) (string, error) {
 		return "", ErrInvalidCookie
 	}
 	return string(plaintext), nil
+}
+
+// IsSecureRequest reports whether r should be treated as an HTTPS request,
+// checking both a direct TLS connection and the conventional
+// X-Forwarded-Proto header set by a reverse proxy that terminates TLS
+// upstream of the Go process. Used to decide whether cookies carry the
+// Secure flag; a deployment behind a proxy that doesn't set this header
+// should set it, or terminate TLS in-process, for cookies to be marked
+// Secure correctly.
+func IsSecureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }

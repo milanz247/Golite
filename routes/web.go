@@ -25,19 +25,30 @@ import (
 // helpers, the unified input payload, encrypted cookies, flash/old input,
 // file uploads, controller/resource routing (Resource, ApiResource,
 // nested + shallow resources, singleton resources, and a single-action
-// controller), and response handling (dynamic return-type serialization,
-// the fluent Response factory, redirects with flash data, specialized
-// formats — Json/View/Download/File/StreamDownload — and macros).
+// controller), response handling (dynamic return-type serialization, the
+// fluent Response factory, redirects with flash data, specialized formats
+// — Json/View/Download/File/StreamDownload — and macros), and the
+// driver-based session engine (the full Session API, and .Block() for
+// atomic per-session locking).
 func MapWebRoutes(kernel *apphttp.Kernel) {
 	userController := controllers.NewUserController()
 
 	// --- Middleware priority: regardless of the order middleware is
 	// assigned on a route or pulled in via a group, it always executes in
 	// this order (anything not listed here runs last, in registration
-	// order) — equivalent to Laravel's $middlewarePriority. CSRF runs
-	// first, mirroring Laravel's own ordering (session/CSRF concerns ahead
-	// of anything that depends on them). ---
-	kernel.MiddlewarePriority = []string{"csrf", "auth", "role", "audit"}
+	// order) — equivalent to Laravel's $middlewarePriority. "session" runs
+	// first (everything else may depend on a session being attached),
+	// then "csrf" (which needs the session to check its token against),
+	// mirroring Laravel's own ordering. ---
+	kernel.MiddlewarePriority = []string{"session", "csrf", "auth", "role", "audit"}
+
+	// --- Sessions: NewKernel already seeds the "web" middleware group with
+	// the name "session" (see Kernel.go), but that name only does
+	// something once it's aliased to a real implementation here, backed by
+	// the kernel's own session manager (kernel.Sessions()) — see
+	// docs/sessions.md for switching its driver or registering a custom
+	// one via Extend. ---
+	kernel.AliasMiddleware("session", middleware.NewStartSession(kernel.Sessions()))
 
 	// --- CSRF protection: NewKernel already seeds the "web" middleware
 	// group with the name "csrf" (see Kernel.go), but that name only does
@@ -150,18 +161,21 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	// <input type="hidden" name="_token"> field or a <meta
 	// name="csrf-token"> tag via c.CsrfToken()); the matching POST must
 	// echo that token back via the "_token" field, X-CSRF-TOKEN, or
-	// X-XSRF-TOKEN, or it's rejected with 419. ---
+	// X-XSRF-TOKEN, or it's rejected with 419. "session" is required
+	// alongside "csrf" on every route below — VerifyCsrfToken calls
+	// c.Session() itself (to check/store the token), which panics unless
+	// a session was already attached. ---
 	kernel.GET("/comments", func(c *apphttp.Context) {
 		c.JSON(http.StatusOK, map[string]string{"csrf_token": c.CsrfToken()})
-	}).Middleware("csrf").Name("comments.form")
+	}).Middleware("session", "csrf").Name("comments.form")
 
-	kernel.POST("/comments", resourceHandler("comments.store")).Middleware("csrf").Name("comments.store")
+	kernel.POST("/comments", resourceHandler("comments.store")).Middleware("session", "csrf").Name("comments.store")
 
 	// A third-party webhook: state-changing (POST), but it can't carry our
 	// session's CSRF token, so it's exempted via VerifyCsrfToken's Except
 	// list ("/stripe/*") rather than by omitting the "csrf" middleware —
 	// the same middleware runs, it just lets this path through.
-	kernel.POST("/stripe/webhook", resourceHandler("stripe.webhook")).Middleware("csrf").Name("stripe.webhook")
+	kernel.POST("/stripe/webhook", resourceHandler("stripe.webhook")).Middleware("session", "csrf").Name("stripe.webhook")
 
 	// --- Request inspection helpers: Path/Is/Url/FullUrl/Method/IsMethod/
 	// Ip/BearerToken/ExpectsJson. Ip() only ever reads Request.RemoteAddr
@@ -227,7 +241,7 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 			"old_email":  c.Old("email"),
 			"csrf_token": c.CsrfToken(),
 		})
-	}).Middleware("csrf").Name("contact.form")
+	}).Middleware("session", "csrf").Name("contact.form")
 
 	kernel.POST("/contact", func(c *apphttp.Context) {
 		if !c.Has("email") {
@@ -238,7 +252,7 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 			return
 		}
 		c.JSON(http.StatusOK, map[string]string{"status": "submitted"})
-	}).Middleware("csrf").Name("contact.submit")
+	}).Middleware("session", "csrf").Name("contact.submit")
 
 	// --- File uploads: HasFile/File, then Store with an automatically
 	// generated, collision-resistant filename. ---
@@ -388,7 +402,7 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	// repopulation), Back, and Away.
 	kernel.GET("/greet-redirect", apphttp.Responder(func(c *apphttp.Context) any {
 		return c.Redirect("/greeting-text").With("flash_message", "Redirected with a flashed message!")
-	})).Name("response.redirect")
+	})).Middleware("session").Name("response.redirect")
 
 	kernel.GET("/go-back", apphttp.Responder(func(c *apphttp.Context) any {
 		return c.Back()
@@ -405,6 +419,87 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	kernel.GET("/shout", apphttp.Responder(func(c *apphttp.Context) any {
 		return c.Macro("caps", "hello from a macro")
 	})).Name("response.macro")
+
+	// --- Sessions: the full Get/Put/Push/Pull/All/Has/Exists/Missing/
+	// Increment/Decrement/Forget/Flush/Regenerate/Invalidate/Flash/Now/
+	// Reflash API on c.Session(), plus .Block() for atomic locking. Every
+	// route below needs the "session" middleware attached directly (they
+	// aren't in the "web" group, which also pulls in "auth"/"audit" —
+	// keeping these routes to just "session" keeps the demo focused). ---
+
+	// Put/Get/Increment: track a visit counter and the last-seen IP.
+	kernel.GET("/session/visit", apphttp.Responder(func(c *apphttp.Context) any {
+		sess := c.Session()
+		visits := sess.Increment("visits")
+		sess.Put("last_ip", c.Ip())
+		return map[string]any{"visits": visits, "last_ip": sess.Get("last_ip")}
+	})).Middleware("session").Name("session.visit")
+
+	// All/Has/Exists/Missing.
+	kernel.GET("/session/all", apphttp.Responder(func(c *apphttp.Context) any {
+		sess := c.Session()
+		return map[string]any{
+			"all":           sess.All(),
+			"has_visits":    sess.Has("visits"),
+			"exists_visits": sess.Exists("visits"),
+			"missing_cart":  sess.Missing("cart"),
+		}
+	})).Middleware("session").Name("session.all")
+
+	// Push, guarded by .Block(): two rapid-fire "add to cart" AJAX
+	// requests sharing a session can't race and silently drop one item —
+	// see docs/sessions.md for exactly what .Block() does and doesn't
+	// guarantee here.
+	kernel.POST("/cart/add", apphttp.Responder(func(c *apphttp.Context) any {
+		item, _ := c.Input("item", "").(string)
+		if item == "" {
+			return c.Response(map[string]string{"error": "item is required"}, http.StatusUnprocessableEntity)
+		}
+		sess := c.Session()
+		sess.Push("cart", item)
+		return map[string]any{"cart": sess.Get("cart", []any{})}
+	})).Middleware("session").Block(5).Name("cart.add")
+
+	// Pull (get + remove in one step) and Forget.
+	kernel.DELETE("/cart", apphttp.Responder(func(c *apphttp.Context) any {
+		sess := c.Session()
+		removed := sess.Pull("cart")
+		sess.Forget("last_ip")
+		return map[string]any{"removed_cart": removed}
+	})).Middleware("session").Name("cart.clear")
+
+	// Flash (readable this request AND the next one) vs Now (readable
+	// only this request); Reflash extends every currently-visible flash
+	// message for one more cycle, and Keep does the same for specific
+	// keys.
+	kernel.GET("/session/flash-demo", apphttp.Responder(func(c *apphttp.Context) any {
+		sess := c.Session()
+		sess.Now("shown_now", "visible only for this request")
+		sess.Flash("notice", "visible for this request and the next one")
+		return map[string]any{"now": sess.Get("shown_now"), "flash": sess.Get("notice")}
+	})).Middleware("session").Name("session.flash-demo")
+
+	kernel.GET("/session/reflash", apphttp.Responder(func(c *apphttp.Context) any {
+		c.Session().Reflash()
+		return map[string]string{"status": "reflashed"}
+	})).Middleware("session").Name("session.reflash")
+
+	// Regenerate (keep the session's data, assign it a fresh ID — call
+	// right after a successful login to prevent session fixation) vs
+	// Invalidate (fresh ID *and* every value discarded — call on logout).
+	// Both go through Context.RegenerateSession/InvalidateSession, not
+	// c.Session().Regenerate/Invalidate directly, since this handler also
+	// writes its own response — see Context.RegenerateSession's doc
+	// comment for why only the Context-level wrapper reliably delivers the
+	// new ID to the client in the same response.
+	kernel.POST("/session/regenerate", apphttp.Responder(func(c *apphttp.Context) any {
+		return map[string]string{"new_session_id": c.RegenerateSession()}
+	})).Middleware("session").Name("session.regenerate")
+
+	kernel.POST("/logout", apphttp.Responder(func(c *apphttp.Context) any {
+		c.InvalidateSession()
+		return map[string]string{"status": "logged out"}
+	})).Middleware("session").Name("logout")
 
 	// --- Redirect shortcut: Route::redirect($from, $to, $status) ---
 	kernel.Redirect("/home", "/user", http.StatusFound)

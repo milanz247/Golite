@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	gosession "Golite/app/Http/Session"
 	"Golite/container"
 )
 
@@ -31,8 +32,14 @@ type Context struct {
 	store    map[string]any
 	executed []Middleware
 
-	sessions *SessionStore
-	session  *Session
+	// session is attached by StartSessionMiddleware, not resolved lazily
+	// — see SetSession and Session's doc comments.
+	session *gosession.Session
+
+	// sessionManager backs RegenerateSession/InvalidateSession, which need
+	// to write the session cookie immediately (not just mutate the Session
+	// object) — see those methods' doc comments for why.
+	sessionManager *gosession.Manager
 
 	appKey []byte
 
@@ -42,15 +49,15 @@ type Context struct {
 	tempFiles []string
 }
 
-func newContext(w http.ResponseWriter, r *http.Request, app *container.Container, sessions *SessionStore, appKey []byte, handlers []HandlerFunc) *Context {
+func newContext(w http.ResponseWriter, r *http.Request, app *container.Container, appKey []byte, sessionManager *gosession.Manager, handlers []HandlerFunc) *Context {
 	return &Context{
-		Writer:   w,
-		Request:  r,
-		App:      app,
-		sessions: sessions,
-		appKey:   appKey,
-		handlers: handlers,
-		index:    -1,
+		Writer:         w,
+		Request:        r,
+		App:            app,
+		appKey:         appKey,
+		sessionManager: sessionManager,
+		handlers:       handlers,
+		index:          -1,
 	}
 }
 
@@ -171,50 +178,106 @@ func (c *Context) Macro(name string, args ...any) *Response {
 	return resp
 }
 
-// Session resolves the current request's session, identified by the
-// SessionCookieName cookie, creating one if the request doesn't carry a
-// valid session cookie yet. The result is cached on the Context, so
-// repeated calls within one request always return the same *Session. The
-// first call for a request with no existing session queues a Set-Cookie
-// header for the new session ID — like any other header, this must happen
-// before the response is written, which is naturally the case for
-// middleware (e.g. VerifyCsrfToken) and any handler code that calls
-// Session/CsrfToken before writing a body.
-//
-// This is also the single hook point where flash data ages by exactly one
-// request (see Session.ageFlashData): it's guarded by the same
-// c.session != nil check that makes Session idempotent within a request,
-// so aging happens exactly once per request, before that request's own
-// Flash (if any) runs.
-func (c *Context) Session() *Session {
-	if c.session != nil {
-		return c.session
-	}
+// oldInputKey is the single session key Flash/Old store the entire
+// unified input payload under, as one nested map — matching Laravel's own
+// internal convention (Request::flash() -> Session::flashInput(), which
+// flashes the whole input array under "_old_input" rather than one
+// session key per field). This is what keeps a flashed field named, say,
+// "email" from colliding with an unrelated Response.With("email", ...)
+// flash message: With flashes directly under the literal key given, while
+// Flash/Old always go through this one level of nesting.
+const oldInputKey = "_old_input"
 
-	sess, found := c.sessionFromCookie()
-	if !found {
-		sess = c.sessions.create()
-		http.SetCookie(c.Writer, &http.Cookie{
-			Name:     SessionCookieName,
-			Value:    sess.ID,
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Secure:   IsSecureRequest(c.Request),
-		})
+// Session returns the request's active session, attached by
+// StartSessionMiddleware before any route handler runs (see
+// app/Http/Middleware/StartSessionMiddleware.go) — this does not create
+// one lazily. Panics if no session was attached, meaning
+// StartSessionMiddleware isn't active on the matched route; register it
+// (NewKernel already seeds the "web" middleware group with "session" —
+// see Kernel.go) on any route that calls Session, CsrfToken, Flash, or
+// Old, directly or indirectly (redirect .With/.WithInput, for instance).
+func (c *Context) Session() *gosession.Session {
+	if c.session == nil {
+		panic("golite: no active session on this request — is StartSessionMiddleware registered on this route? (see docs/sessions.md)")
 	}
-
-	c.session = sess
-	sess.ageFlashData()
-	return sess
+	return c.session
 }
 
-func (c *Context) sessionFromCookie() (*Session, bool) {
-	cookie, err := c.Request.Cookie(SessionCookieName)
-	if err != nil {
-		return nil, false
+// SetSession attaches sess to the request. Called by StartSessionMiddleware
+// once per request; application code should not need to call this
+// directly.
+func (c *Context) SetSession(sess *gosession.Session) {
+	c.session = sess
+}
+
+// RegenerateSession regenerates the active session's ID (see
+// gosession.Session.Regenerate) and immediately refreshes the session
+// cookie to carry the new one.
+//
+// This exists because of a Go http.ResponseWriter constraint:
+// StartSessionMiddleware queues the session cookie *before* the rest of the
+// chain runs (so it isn't silently dropped once a handler's response body
+// finalizes the headers — see that middleware's doc comment), using
+// whatever the session's ID was at that point. If a handler regenerates the
+// ID mid-request and then writes its own response, that "before" cookie is
+// already wrong and there is no later opportunity to fix it — WriteHeader
+// will already have run by the time StartSessionMiddleware's own code
+// resumes. Calling RegenerateSession from the handler, before it writes
+// anything, updates the already-queued cookie in place (headers can be
+// freely rewritten right up until WriteHeader is actually called), so the
+// client receives the new ID in the very same response — critical for
+// preventing session fixation around a login, where the response
+// confirming success and the cookie carrying the new ID need to arrive
+// together. Prefer this over calling c.Session().Regenerate() directly
+// whenever the client needs to see the new ID in this response.
+func (c *Context) RegenerateSession() string {
+	newID := c.Session().Regenerate()
+	c.refreshSessionCookie(newID)
+	return newID
+}
+
+// InvalidateSession is RegenerateSession's counterpart for
+// gosession.Session.Invalidate — see RegenerateSession's doc comment for why
+// this, rather than c.Session().Invalidate() directly, is needed to make
+// the new session ID reach the client in the same response (typically used
+// right before a logout redirect).
+func (c *Context) InvalidateSession() {
+	c.Session().Invalidate()
+	c.refreshSessionCookie(c.Session().ID())
+}
+
+// refreshSessionCookie queues (or, if StartSessionMiddleware already queued
+// one earlier in this same request, replaces) the session cookie with
+// value. Cookies share the "Set-Cookie" response header across possibly
+// many distinct cookies, so this searches the header's existing values for
+// one already carrying this session's cookie name and overwrites just that
+// entry, rather than blindly appending a duplicate (which would leave two
+// conflicting Set-Cookie lines for the same cookie name — surprisingly not
+// well-defined across HTTP clients).
+func (c *Context) refreshSessionCookie(value string) {
+	if c.sessionManager == nil {
+		return
 	}
-	return c.sessions.find(cookie.Value)
+	cookie := &http.Cookie{
+		Name:     c.sessionManager.CookieName(),
+		Value:    value,
+		Path:     "/",
+		MaxAge:   c.sessionManager.Lifetime(),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   IsSecureRequest(c.Request),
+	}
+	encoded := cookie.String()
+
+	prefix := c.sessionManager.CookieName() + "="
+	existing := c.Writer.Header()["Set-Cookie"]
+	for i, h := range existing {
+		if strings.HasPrefix(h, prefix) {
+			existing[i] = encoded
+			return
+		}
+	}
+	c.Writer.Header().Add("Set-Cookie", encoded)
 }
 
 // CsrfToken returns the active session's CSRF token, generating one on
@@ -232,17 +295,22 @@ func (c *Context) CsrfToken() string {
 // Request::flash().
 func (c *Context) Flash() {
 	c.resolveInput()
-	sess := c.Session()
-	for key, value := range c.input {
-		sess.flashPut(key, stringifyInputValue(value))
-	}
+	c.Session().Flash(oldInputKey, c.input)
 }
 
 // Old retrieves a value flashed on the *previous* request via Flash, for
 // repopulating a form field after a redirect — Laravel's old() helper /
 // Request::old(). Returns "" if nothing was flashed under that key.
 func (c *Context) Old(key string) string {
-	return c.Session().flashGet(key)
+	fields, ok := c.Session().Get(oldInputKey).(map[string]any)
+	if !ok {
+		return ""
+	}
+	v, ok := fields[key]
+	if !ok {
+		return ""
+	}
+	return stringifyInputValue(v)
 }
 
 // Cookie retrieves and decrypts a cookie previously set with SetCookie,

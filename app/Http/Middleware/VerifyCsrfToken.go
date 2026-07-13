@@ -125,9 +125,9 @@ func tokenFromRequest(r *http.Request) string {
 // off cross-site requests without breaking normal top-level navigation,
 // and Secure is set whenever the request is (or is reported by a trusted
 // proxy to be) HTTPS. Unlike the session cookie itself (HttpOnly, set by
-// Context.Session), this cookie carries no session identity on its own —
-// it's only useful paired with the actual session cookie, so a leaked
-// XSRF-TOKEN alone doesn't let an attacker impersonate the session.
+// StartSessionMiddleware), this cookie carries no session identity on its
+// own — it's only useful paired with the actual session cookie, so a
+// leaked XSRF-TOKEN alone doesn't let an attacker impersonate the session.
 func (m *VerifyCsrfToken) syncCookie(c *apphttp.Context) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "XSRF-TOKEN",
