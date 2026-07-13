@@ -2,7 +2,10 @@
 
 Files: [`app/Http/Controllers/Controller.go`](../app/Http/Controllers/Controller.go),
 [`app/Http/Resource.go`](../app/Http/Resource.go),
+[`app/Http/Injection.go`](../app/Http/Injection.go) (`Inject`, method injection),
+[`container/container.go`](../container/container.go) (`Container.ResolveType`),
 [`app/Http/Controllers/PostController.go`](../app/Http/Controllers/PostController.go),
+[`app/Http/Controllers/UserController.go`](../app/Http/Controllers/UserController.go),
 [`app/Http/Controllers/CommentController.go`](../app/Http/Controllers/CommentController.go),
 [`app/Http/Controllers/ProfileController.go`](../app/Http/Controllers/ProfileController.go),
 [`app/Http/Controllers/ProvisionServerController.go`](../app/Http/Controllers/ProvisionServerController.go)
@@ -54,12 +57,15 @@ This is the same pattern the codebase already uses for
 [`Middleware`](middleware.md#the-middleware-contract) and
 [`TerminableMiddleware`](middleware.md#terminable-middleware).
 
-## Dependency injection into controller constructors
+## Dependency injection: two flavors
 
-Golite's container has no reflection-based auto-wiring (a deliberate,
-documented choice — see
-[developer-guide.md](developer-guide.md#known-limitations--extension-points)).
-"Constructor injection" here means exactly what it says: a controller's
+Golite supports both of Laravel's controller injection styles. Which one
+to reach for is a judgment call, not a rule — see the guidance at the end
+of this section.
+
+### Constructor injection
+
+"Constructor injection" means exactly what it says: a controller's
 constructor takes its dependencies as ordinary parameters, and the caller
 (`routes/web.go`, typically) resolves them from the container and passes
 them in:
@@ -67,6 +73,8 @@ them in:
 ```go
 type Hasher interface {
 	Make(value string) string
+	Check(value, hashedValue string) bool
+	NeedsRehash(hashedValue string) bool
 }
 
 func NewPostController(hasher Hasher) *PostController { /* ... */ }
@@ -77,10 +85,76 @@ postController := controllers.NewPostController(kernel.Container().Make("hash").
 ```
 
 `Hasher` is exported specifically so call sites outside the `controllers`
-package can name it for the type assertion — the same reasoning that led
-`UserController` to keep its own `hashService` contract unexported (no
-outside caller needs to name *that* one, since nothing constructs
-`UserController` with an injected argument).
+package can name it for the type assertion. `PostController` needs this
+style regardless of anything else: its dependency has to be available
+*before* the controller exists, since `NewPostController` also calls
+`c.Middleware("auth").Except(...)` in its own body (see above) — there's
+no action method to inject into yet at that point.
+
+### Method injection — `apphttp.Inject`
+
+For a controller whose actions each just need a service for the duration
+of that one request — no constructor-time setup — Golite also supports
+Laravel's other, arguably more common style: type-hinting the dependency
+directly as an action parameter, resolved automatically:
+
+```php
+// Laravel
+public function show(Hasher $hash, Repository $config) { ... }
+```
+
+```go
+// Golite
+func (u *UserController) Show(c *apphttp.Context, hash Hasher, cfg *config.Config) {
+	c.JSON(http.StatusOK, map[string]any{
+		"app": cfg.App,
+		"user": map[string]string{"token": hash.Make("jane@example.com"), /* ... */},
+	})
+}
+```
+
+Wire it up with `apphttp.Inject`, which wraps the method value into an
+ordinary `HandlerFunc`:
+
+```go
+kernel.GET("/user", apphttp.Inject(kernel.Container(), userController.Show)).Name("user.show")
+```
+
+`Inject` uses `reflect` to walk the handler's parameter list: the first
+parameter must be `*apphttp.Context` (checked once, at route-registration
+time — a mismatch panics immediately rather than at request time), and
+every parameter after it is resolved on *every call* via
+`container.Container.ResolveType(t)`, which returns the first bound
+service whose concrete type is assignable to `t`. This is what makes
+`Hasher` (an interface) and `*config.Config` (a concrete type) both work
+as plain parameters with no string key on either side — the container
+doesn't need to know a parameter is coming, and the handler doesn't need
+to know what key it was bound under.
+
+This is real reflection-based auto-wiring, deliberately added on top of
+Golite's plain, no-magic container (`Bind`/`Make` by string name) rather
+than replacing it — `ResolveType` still just linearly scans whatever's
+bound, so if two services in the container happened to satisfy the same
+interface shape, which one `Inject` picks is unspecified (map iteration
+order). That's fine for Golite's small, mostly-singleton service set
+(`"hash"`, `"encrypter"`, `"log"`, `"config"`, ...), but it's the reason
+`Inject` isn't a wholesale replacement for constructor injection: a
+controller that genuinely needs to disambiguate between two
+implementations of the same interface should take that one explicitly, in
+its constructor, instead.
+
+### Which one to use
+
+- **Method injection (`apphttp.Inject`)** for a controller whose actions
+  independently need one or two services and nothing else — it's the
+  closest match to Laravel's everyday style, and needs no constructor at
+  all. `UserController`, `CryptoController`, `HashController`, and
+  `LogController` all use it.
+- **Constructor injection** when a dependency has to exist before any
+  action runs (e.g. to configure `Controller.Middleware(...)` in the
+  constructor, like `PostController`), or when a controller needs to
+  guarantee *which* implementation of an ambiguous interface it gets
+  rather than leaving it to `ResolveType`'s "first match" scan.
 
 ## Single-action (invokable) controllers
 

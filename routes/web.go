@@ -11,8 +11,6 @@ import (
 	apphttp "Golite/app/Http"
 	"Golite/app/Http/Controllers"
 	"Golite/app/Http/Middleware"
-	"Golite/encryption"
-	"Golite/logging"
 )
 
 // MapWebRoutes registers the application's web routes onto the kernel,
@@ -90,7 +88,12 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	// kernel.Resource("posts", postController) further down, which covers
 	// the same methods/paths — see the "Controllers & resource routing"
 	// section — so registering both would collide.)
-	kernel.GET("/user", userController.Show).Name("user.show")
+	// userController.Show declares Hasher and *config.Config as ordinary
+	// parameters (Laravel-style method injection: public function
+	// show(Hasher $hash, Repository $config)) instead of pulling them out
+	// of the container itself — apphttp.Inject resolves each one by type
+	// at request time. See docs/controllers.md#method-injection.
+	kernel.GET("/user", apphttp.Inject(kernel.Container(), userController.Show)).Name("user.show")
 
 	// --- Route::match and Route::any ---
 	kernel.Match([]string{http.MethodGet, http.MethodPost}, "/posts/search", resourceHandler("posts.search")).
@@ -140,7 +143,7 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	//       Route::get("/health", ...)->withoutMiddleware("audit")->name("health");
 	//   });
 	kernel.Prefix("admin").Middleware([]string{"web", "role:admin"}).Name("admin.").Group(func(admin *apphttp.RouteGroup) {
-		admin.GET("/users", userController.Show).Name("users") // GET /admin/users, named "admin.users"
+		admin.GET("/users", apphttp.Inject(kernel.Container(), userController.Show)).Name("users") // GET /admin/users, named "admin.users"
 
 		// This route sits inside "admin" (which pulls in "web" ->
 		// auth+audit, plus "role:admin"), but opts out of auditing
@@ -506,18 +509,21 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	// --- Encryption, Hashing, Validation, Error Handling, Logging: one
 	// small controller per feature (CryptoController/HashController/
 	// ValidationController/ErrorDemoController/LogController, all in
-	// app/Http/Controllers), each constructor-injected with the container
-	// service it needs -- the same pattern PostController already uses for
-	// its Hasher, just one concern per controller instead of one big file
-	// of closures. See docs/encryption.md, docs/hashing.md,
-	// docs/validation.md, docs/error-handling.md, docs/logging.md. ---
-	cryptoController := controllers.NewCryptoController(kernel.Container().Make("encrypter").(*encryption.Encrypter))
-	kernel.GET("/crypto/encrypt", cryptoController.Encrypt).Name("crypto.encrypt")
-	kernel.GET("/crypto/decrypt", cryptoController.Decrypt).Name("crypto.decrypt")
+	// app/Http/Controllers). CryptoController/HashController/LogController
+	// take no constructor arguments at all -- each action instead declares
+	// the service it needs as an ordinary parameter (Encrypter/Hasher/
+	// logging.Logger), resolved automatically by apphttp.Inject, the same
+	// Laravel-style method injection userController.Show uses above. See
+	// docs/controllers.md#method-injection, docs/encryption.md,
+	// docs/hashing.md, docs/validation.md, docs/error-handling.md,
+	// docs/logging.md. ---
+	cryptoController := controllers.NewCryptoController()
+	kernel.GET("/crypto/encrypt", apphttp.Inject(kernel.Container(), cryptoController.Encrypt)).Name("crypto.encrypt")
+	kernel.GET("/crypto/decrypt", apphttp.Inject(kernel.Container(), cryptoController.Decrypt)).Name("crypto.decrypt")
 
-	hashController := controllers.NewHashController(kernel.Container().Make("hash").(controllers.Hasher))
-	kernel.POST("/hash/make", hashController.Make).Name("hash.make")
-	kernel.POST("/hash/check", hashController.Check).Name("hash.check")
+	hashController := controllers.NewHashController()
+	kernel.POST("/hash/make", apphttp.Inject(kernel.Container(), hashController.Make)).Name("hash.make")
+	kernel.POST("/hash/check", apphttp.Inject(kernel.Container(), hashController.Check)).Name("hash.check")
 
 	validationController := controllers.NewValidationController()
 	kernel.POST("/register", validationController.Register).Name("register")
@@ -527,8 +533,8 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 	kernel.GET("/errors/not-found", errorDemoController.NotFound).Name("errors.not-found")
 	kernel.GET("/errors/boom", errorDemoController.Boom).Name("errors.boom")
 
-	logController := controllers.NewLogController(kernel.Container().Make("log").(logging.Logger))
-	kernel.GET("/logs/demo", logController.Demo).Name("logs.demo")
+	logController := controllers.NewLogController()
+	kernel.GET("/logs/demo", apphttp.Inject(kernel.Container(), logController.Demo)).Name("logs.demo")
 
 	// --- Redirect shortcut: Route::redirect($from, $to, $status) ---
 	kernel.Redirect("/home", "/user", http.StatusFound)

@@ -46,6 +46,7 @@ Golite/
 │   └── Http/
 │       ├── Kernel.go                 # Kernel, Middleware, RouteDefinition, RouteGroup — the router
 │       ├── Resource.go               # Route::resource/apiResource/singleton, Invokable, ControllerMiddleware
+│       ├── Injection.go              # Inject: Laravel-style method injection via Container.ResolveType
 │       ├── Response.go               # Response factory, Responder/auto-conversion, macros, view rendering
 │       ├── Context.go                # Context struct + methods (JSON, Redirect, Session, CsrfToken, files, ...)
 │       ├── Input.go                  # Unified input payload: All/Input/Query/Has/Only/Except/Boolean/Merge
@@ -75,16 +76,16 @@ Golite/
 │       │   └── TrustHosts.go                        # Rejects requests with an untrusted Host header
 │       └── Controllers/
 │           ├── Controller.go                  # Base Controller: per-action middleware rules
-│           ├── UserController.go              # Example controller
+│           ├── UserController.go              # Method-injected Hasher + *config.Config (controllers.md#method-injection)
 │           ├── PostController.go               # Full resource + DI + controller middleware
 │           ├── CommentController.go             # Nested + shallow resource demo
 │           ├── ProfileController.go             # Singleton resource demo
 │           ├── ProvisionServerController.go     # Invokable (single-action) controller demo
-│           ├── CryptoController.go              # Encrypt/Decrypt (encryption.md)
-│           ├── HashController.go                # Make/Check (hashing.md)
+│           ├── CryptoController.go              # Encrypt/Decrypt, method-injected *encryption.Encrypter (encryption.md)
+│           ├── HashController.go                # Make/Check, method-injected Hasher (hashing.md)
 │           ├── ValidationController.go          # Register (validation.md)
 │           ├── ErrorDemoController.go           # Abort/NotFound/Boom (error-handling.md)
-│           └── LogController.go                 # Demo (logging.md)
+│           └── LogController.go                 # Demo, method-injected logging.Logger (logging.md)
 ├── routes/
 │   └── web.go                    # MapWebRoutes: registers paths onto the kernel
 ├── resources/
@@ -119,6 +120,7 @@ Golite/
 | `validation.Validator`                    | `Illuminate\Validation\Validator`            |
 | `app/Exceptions/` (`HttpException`, `Render`) | `App\Exceptions\Handler` + Laravel's exceptions |
 | `app/Http/Middleware/RecoverMiddleware.go`| the implicit exception-handling wrapper every Laravel request runs inside |
+| `apphttp.Inject` + `Container.ResolveType`| automatic controller method injection (`public function show(Hasher $hash)`) |
 | `logging.Manager`                         | `Illuminate\Log\LogManager` / `Log`          |
 
 ## Design decisions worth knowing
@@ -294,6 +296,18 @@ Golite/
   reportable failures (5xx, or an unrecognized panic value) to the log.
   See [error-handling.md](error-handling.md#what-gets-logged--
   exceptionsshouldreport).
+- **Reflection-based auto-wiring exists, but only at one seam:
+  `apphttp.Inject` resolving a controller *method's* parameters.**
+  `Container.Bind`/`Make` themselves stay plain string-keyed lookups —
+  the container doesn't scan struct tags or constructor signatures the
+  way Laravel's does. `Inject` (`app/Http/Injection.go`) is a narrow,
+  opt-in layer on top: it reflects on a handler's parameter *types* and
+  resolves each one via `Container.ResolveType`'s "first assignable
+  match" scan. Keeping this scoped to method injection (not baked into
+  `Make` itself) means the simple, non-reflective path is still there for
+  everything that doesn't need it — including `PostController`'s
+  constructor injection, unchanged. See
+  [controllers.md](controllers.md#method-injection--apphttpinject).
 - **`encryption.Encrypter` and the cookie/session engine's own
   AES-256-GCM helpers are deliberately independent, not unified.**
   `Kernel.appKey` (cookie/session encryption) is intentionally

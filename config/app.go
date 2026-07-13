@@ -20,7 +20,13 @@ type AppConfig struct {
 	Env   string
 	Port  string
 	Debug bool
-	Key   []byte // AES-256 key for encryption.Encrypter, decoded from APP_KEY
+	// Key is the AES-256 key for encryption.Encrypter, decoded from
+	// APP_KEY. json:"-" is deliberate, not decorative: AppConfig gets
+	// serialized wholesale by demo routes like UserController.Show
+	// (`"app": cfg.App`), and this is a raw encryption key — it must never
+	// round-trip into a JSON response, logged output, or anywhere else
+	// something might serialize a Config value without thinking about it.
+	Key []byte `json:"-"`
 }
 
 // LogConfig mirrors config('logging.*'): which channel is used by default,

@@ -320,10 +320,17 @@ response macro via `apphttp.ResponseFactory.Macro(...)`.
   approach Laravel itself uses and is fine at the route counts a
   lightweight framework expects; if the route table grows very large, a
   trie keyed by static path segments would be the natural next step.
-- **The container has no auto-wiring.** `Bind`/`Make` are name + manual
-  type-assertion based, on purpose — there's no reflection-based
-  constructor injection like Laravel's automatic resolution. Keep bindings
-  explicit.
+- **The container's core `Bind`/`Make` stay name + manual
+  type-assertion based, on purpose.** Auto-wiring exists, but it's opt-in
+  and scoped to one place: `apphttp.Inject` resolves a *controller
+  method's* parameters by type via `Container.ResolveType` (Laravel-style
+  method injection — see
+  [controllers.md](controllers.md#method-injection--apphttpinject)).
+  `Bind`/`Make` themselves never got reflection bolted on, and
+  `ResolveType`'s "first assignable match" scan is a deliberately simple
+  (not Laravel-parity) resolution strategy — keep one implementation bound
+  per distinct interface shape, or use constructor injection instead when
+  a controller needs to disambiguate.
 - **The default `"memory"` session driver is process-local**, with no
   persistence across a restart; `"file"` and `"cookie"` are available for
   more durable use cases, and `Manager.Extend` covers anything else

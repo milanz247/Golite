@@ -52,12 +52,15 @@ structs and interfaces instead of reflection-based magic.
   and rejecting Host header injection
 - A Laravel-standard controller layer: a base `Controller` every
   controller can embed for its own per-action middleware
-  (`.Middleware("auth").Except("index", "show")`), constructor dependency
-  injection resolved from the service container, single-action
-  (`Invokable`) controllers, and `Route::resource`/`apiResource`/
-  `singleton` — reflection-based (a controller need only implement the
-  actions it has), with nested (`"photos.comments"`) and `.Shallow()`
-  routing, and `.Only(...)`/`.Except(...)` filtering
+  (`.Middleware("auth").Except("index", "show")`), both constructor
+  dependency injection *and* Laravel-style automatic method injection
+  (`func (u *UserController) Show(c *apphttp.Context, hash Hasher, cfg *config.Config)`,
+  wired up via `apphttp.Inject`, resolved by type from the service
+  container), single-action (`Invokable`) controllers, and
+  `Route::resource`/`apiResource`/`singleton` — reflection-based (a
+  controller need only implement the actions it has), with nested
+  (`"photos.comments"`) and `.Shallow()` routing, and
+  `.Only(...)`/`.Except(...)` filtering
 - A Laravel-standard response layer: handlers can optionally return a
   value (`apphttp.Responder`) instead of writing the response themselves —
   a string auto-sends as `text/html`, a struct/map/slice as JSON — and a

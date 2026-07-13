@@ -33,6 +33,19 @@ func (c *Container) Make(name string) any
   (`NewApplication`, `Register`, `Boot`), while `Make` happens on every
   request, so reads are optimized to run concurrently.
 
+A third method exists purely to power method injection (see
+[controllers.md](controllers.md#method-injection--apphttpinject)) and
+isn't meant to be called directly outside `apphttp.Inject`:
+
+```go
+func (c *Container) ResolveType(t reflect.Type) (any, bool)
+```
+
+Instead of a string key, `ResolveType` returns the first bound service
+whose concrete type is assignable to `t` — a linear scan, not an index,
+so it stays correct as long as at most one bound service satisfies any
+given interface/type shape used this way.
+
 ## Where the container lives
 
 One `*container.Container` is created in `bootstrap.NewApplication()` and
