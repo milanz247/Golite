@@ -12,6 +12,7 @@ import (
 
 	gosession "Golite/app/Http/Session"
 	"Golite/container"
+	"Golite/validation"
 )
 
 // Context wraps the request/response pair together with the application's
@@ -122,6 +123,26 @@ func (c *Context) JSON(status int, payload any) {
 	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(status)
 	_ = json.NewEncoder(c.Writer).Encode(payload)
+}
+
+// Validate validates the request's unified input (c.All()) against rules
+// ("field": "required|email|...", see the validation package), mirroring
+// Laravel's $request->validate($rules). On success it returns the
+// validated subset of input; on failure it panics with a
+// *validation.Exception, which RecoverMiddleware (see
+// app/Http/Middleware/RecoverMiddleware.go, and docs/error-handling.md)
+// turns into a 422 JSON response carrying the field errors — the same
+// automatic behavior Laravel's own exception handler gives
+// ValidationException, without every handler needing its own
+// `if v.Fails() { ... }` boilerplate. RecoverMiddleware must be registered
+// (see public/main.go) for a failure here to render cleanly rather than
+// crash the connection.
+func (c *Context) Validate(rules map[string]string) map[string]any {
+	validated, err := validation.Make(c.All(), rules).Validated()
+	if err != nil {
+		panic(err)
+	}
+	return validated
 }
 
 // Response starts a fluent response (see the *Response type and its

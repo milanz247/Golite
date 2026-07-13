@@ -12,5 +12,10 @@
 - [HTTP Request Handling](http-requests.md) — request inspection helpers, the unified input payload, encrypted cookies, flash/old input, file uploads, `TrimStrings`/`ConvertEmptyStringsToNull`/`TrustProxies`/`TrustHosts`
 - [Controllers & Resource Routing](controllers.md) — the base `Controller`, constructor DI, invokable controllers, `Route::resource`/`apiResource`, nested + shallow resources, singleton resources
 - [HTTP Response Handling](responses.md) — dynamic return-type serialization, the fluent `Response` factory, redirects with flash data, `Json`/`View`/`Download`/`File`/`StreamDownload`, response macros
+- [Encryption](encryption.md) — `encryption.Encrypter`, AES-256-GCM, the persisted `APP_KEY` vs. the cookie/session engine's deliberately ephemeral key
+- [Hashing](hashing.md) — the `Hasher` interface, `BcryptHasher`, the driver-based `hashing.Manager`, the `"hash"` container binding
+- [Validation](validation.md) — rule strings, built-in rules, custom rules via `Extend`, `Context.Validate` and automatic 422 responses
+- [Error Handling](error-handling.md) — `panic`/`recover` as Golite's exception mechanism, `HttpException`/`abort()`, `RecoverMiddleware`, what gets logged vs. rendered
+- [Logging](logging.md) — PSR-3 levels, `single`/`daily`/`stack` channels, the driver-based `logging.Manager`, the `"log"` container binding
 - [Configuration](configuration.md) — `.env`, `config.LoadConfig()`, adding new config values
 - [Developer Guide](developer-guide.md) — practical how-tos: running the app, adding routes/services/providers/middleware, known limitations

@@ -16,6 +16,10 @@ DB_HOST=127.0.0.1
 DB_PORT=3306
 ```
 
+See [`.env.example`](../.env.example) for the full set Golite reads,
+including the optional `APP_DEBUG`, `APP_KEY`, `LOG_*`, and `HASH_*`
+variables described below.
+
 `.env` is listed in [`.gitignore`](../.gitignore) and is **not** committed
 to the repository — it's local/per-environment configuration. Each
 deployment environment should have its own `.env` (or equivalent process
@@ -25,13 +29,28 @@ environment variables).
 
 ```go
 type AppConfig struct {
-	Name string
-	Env  string
-	Port string
+	Name  string
+	Env   string
+	Port  string
+	Debug bool
+	Key   []byte // AES-256 key for encryption.Encrypter, decoded from APP_KEY
+}
+
+type LogConfig struct {
+	Channel string
+	Path    string
+	Days    int
+}
+
+type HashConfig struct {
+	Driver     string
+	BcryptCost int
 }
 
 type Config struct {
-	App AppConfig
+	App  AppConfig
+	Log  LogConfig
+	Hash HashConfig
 }
 
 func LoadConfig() *Config {
@@ -39,11 +58,24 @@ func LoadConfig() *Config {
 		log.Println("[Config] no .env file found, falling back to system environment")
 	}
 
+	env := getEnv("APP_ENV", "local")
+
 	return &Config{
 		App: AppConfig{
-			Name: getEnv("APP_NAME", "Golite"),
-			Env:  getEnv("APP_ENV", "local"),
-			Port: getEnv("APP_PORT", ":8080"),
+			Name:  getEnv("APP_NAME", "Golite"),
+			Env:   env,
+			Port:  getEnv("APP_PORT", ":8080"),
+			Debug: getEnvBool("APP_DEBUG", env != "production"),
+			Key:   loadAppKey(),
+		},
+		Log: LogConfig{
+			Channel: getEnv("LOG_CHANNEL", "single"),
+			Path:    getEnv("LOG_PATH", "storage/logs/golite.log"),
+			Days:    getEnvInt("LOG_DAILY_DAYS", 14),
+		},
+		Hash: HashConfig{
+			Driver:     getEnv("HASH_DRIVER", "bcrypt"),
+			BcryptCost: getEnvInt("HASH_BCRYPT_COST", 10),
 		},
 	}
 }
@@ -53,9 +85,17 @@ func LoadConfig() *Config {
   file exists. If it doesn't (e.g. in production, where real environment
   variables are set directly), Golite logs a notice and continues —
   `getEnv` still reads from whatever is in the process environment.
-- `getEnv(key, fallback)` returns the fallback if the variable is unset *or
-  empty*, so an accidentally blank `.env` line doesn't produce an empty
+- `getEnv(key, fallback)` / `getEnvBool` / `getEnvInt` all return the
+  fallback if the variable is unset, empty, or fails to parse, so an
+  accidentally blank or malformed `.env` line doesn't produce a broken
   config value.
+- `App.Debug` defaults to `true` unless `APP_ENV=production` (override
+  either way with `APP_DEBUG`) — it gates whether error responses include
+  raw error detail; see [error-handling.md](error-handling.md).
+- `App.Key` is decoded from `APP_KEY` (`base64:...` or bare base64, 32
+  bytes). If absent or invalid, `loadAppKey` generates an ephemeral key for
+  that process only and logs a warning — see
+  [encryption.md](encryption.md#app_key-and-configloadconfig).
 
 `LoadConfig()` is called once, in `bootstrap.NewApplication()` (see
 [bootstrapping.md](bootstrapping.md)), and the resulting `*Config` is:

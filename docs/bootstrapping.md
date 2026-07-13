@@ -66,11 +66,23 @@ func (app *Application) Register(p providers.ServiceProvider) {
 
 At this stage, providers should only **bind** things into the container —
 they should not assume any other provider has finished registering yet.
-`AppServiceProvider.Register` binds a `"hash"` service:
+`AppServiceProvider.Register` binds `"hash"`, `"encrypter"`, and `"log"`
+(see [hashing.md](hashing.md), [encryption.md](encryption.md), and
+[logging.md](logging.md)):
 
 ```go
 func (p *AppServiceProvider) Register(c *container.Container) {
-	c.Bind("hash", NewHasher())
+	cfg := c.Make("config").(*config.Config)
+
+	hasher := hashing.NewManager(cfg.Hash.Driver)
+	hasher.Extend("bcrypt", hashing.NewBcryptHasher(cfg.Hash.BcryptCost))
+	c.Bind("hash", hasher)
+
+	c.Bind("encrypter", encryption.NewEncrypter(cfg.App.Key))
+
+	logger := logging.NewManager(cfg.Log.Channel)
+	logger.Extend("single", logging.NewSingleChannel(cfg.Log.Path))
+	c.Bind("log", logger)
 }
 ```
 
@@ -80,12 +92,18 @@ the rest of the app to exist first, so it defers all work to `Boot`.
 ## 3. Registering global middleware
 
 ```go
-app.Kernel.UseMiddleware(appMiddleware.Logger())
+app.Kernel.UseMiddleware(
+	appMiddleware.Recover(app.Container.Make("log").(logging.Logger), app.Config.App.Debug),
+	appMiddleware.Logger(),
+)
 ```
 
 Middleware is attached directly to the kernel before `Boot()` runs, so it's
 guaranteed to wrap every route, including any routes registered by
-`RouteServiceProvider` during boot.
+`RouteServiceProvider` during boot. `Recover` (see
+[error-handling.md](error-handling.md)) is registered **first** — anything
+registered ahead of it would run outside its deferred `recover()` and
+still crash the connection on panic.
 
 ## 4. `app.Boot()`
 

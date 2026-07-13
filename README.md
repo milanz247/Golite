@@ -67,6 +67,23 @@ structs and interfaces instead of reflection-based magic.
   redirects (`Redirect`/`Back`/`Away`) with one-shot flash data
   (`With`/`WithInput`), and a global macro registry
   (`ResponseFactory.Macro(...)`) for reusable custom responses
+- A general-purpose `encryption.Encrypter` (AES-256-GCM), bound as
+  `"encrypter"` from a persisted `APP_KEY` — Laravel's `Crypt` facade
+  equivalent, deliberately independent from the cookie/session engine's own
+  ephemeral key
+- A driver-based `hashing.Manager` (bcrypt by default), bound as `"hash"` —
+  `Make`/`Check`/`NeedsRehash`, plus `Extend` for custom drivers
+- Laravel-style validation: pipe-separated rule strings
+  (`"required|email|min:3"`, 17 built-ins, `Extend` for custom rules)
+  against a `map[string]any` payload, and `Context.Validate` for an
+  automatic 422 JSON response on failure
+- `panic`/`recover`-based error handling: `exceptions.HttpException` +
+  `abort()`-style constructors, a global `RecoverMiddleware` that renders
+  JSON error responses (with debug-gated detail) from anywhere downstream,
+  and `ShouldReport` to keep expected 4xx conditions out of the log
+- A driver-based `logging.Manager` with PSR-3 levels and
+  `"single"`/`"daily"`/`"stack"` channels, bound as `"log"`, writing to
+  `storage/logs/`
 
 ## Requirements
 
@@ -98,7 +115,10 @@ DB_PORT=3306
 ```
 
 `.env` is git-ignored — create your own in the project root before running
-the app. See [docs/configuration.md](docs/configuration.md) for details.
+the app. See [.env.example](.env.example) for the full set of variables
+(including `APP_KEY`, `LOG_CHANNEL`, and `HASH_DRIVER` — all optional, with
+sane defaults) and [docs/configuration.md](docs/configuration.md) for
+details.
 
 ## Project structure
 
@@ -108,20 +128,25 @@ Golite/
 ├── go.mod / go.sum
 ├── config/           # Configuration loaded from .env
 ├── container/        # Thread-safe IoC container
+├── encryption/       # AES-256-GCM Encrypter (Crypt facade equivalent, persisted APP_KEY)
+├── hashing/          # Driver-based Hasher/Manager (bcrypt default)
+├── validation/       # Rule-string Validator, built-in + custom rules
+├── logging/          # Driver-based logging Manager (single/daily/stack channels)
 ├── bootstrap/        # Application struct: wires everything together
 ├── app/
 │   ├── Providers/     # Service providers (Register/Boot)
+│   ├── Exceptions/    # HttpException, abort()-style helpers, panic -> JSON rendering
 │   └── Http/
 │       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
 │       ├── Resource.go        # Route::resource/apiResource/singleton, Invokable controllers
 │       ├── Response.go        # Response factory, Responder/auto-conversion, macros, view rendering
-│       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken, cookies, files
+│       ├── Context.go         # Per-request Context: params, JSON/Redirect, Session, CsrfToken, cookies, files, Validate
 │       ├── Input.go           # Unified input payload (query + JSON/form body)
 │       ├── Cookie.go          # AES-256-GCM cookie encryption
 │       ├── UploadedFile.go    # Uploaded file handling
 │       ├── SessionBlock.go    # RouteDefinition.Block: atomic per-session locking
 │       ├── Session/           # Driver-based session engine (memory/file/cookie + custom drivers)
-│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, session, CSRF & normalization middleware
+│       ├── Middleware/        # Global, aliased, grouped, parameterized, terminable, session, CSRF, panic-recovery & normalization middleware
 │       └── Controllers/       # Base Controller + route handlers (resource, nested, singleton, invokable demos)
 ├── routes/           # Route definitions (routes/web.go)
 ├── resources/views/  # html/template files for Response.View
@@ -134,7 +159,8 @@ Golite/
 Full framework documentation — architecture, the bootstrapping process, the
 request lifecycle, the service container, providers, routing, middleware,
 CSRF protection, HTTP request handling, controllers & resource routing,
-response handling, configuration, and a developer guide — lives in
+response handling, encryption, hashing, validation, error handling,
+logging, configuration, and a developer guide — lives in
 [`docs/`](docs/README.md).
 
 ## Building and testing

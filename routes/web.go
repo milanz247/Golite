@@ -6,11 +6,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	exceptions "Golite/app/Exceptions"
 	apphttp "Golite/app/Http"
 	"Golite/app/Http/Controllers"
 	"Golite/app/Http/Middleware"
+	"Golite/encryption"
+	"Golite/hashing"
+	"Golite/logging"
 )
 
 // MapWebRoutes registers the application's web routes onto the kernel,
@@ -500,6 +505,102 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 		c.InvalidateSession()
 		return map[string]string{"status": "logged out"}
 	})).Middleware("session").Name("logout")
+
+	// --- Encryption: encryption.Encrypter, resolved from the container
+	// under "encrypter" (bound in AppServiceProvider.Register from the
+	// persisted APP_KEY — see docs/encryption.md for how this differs from
+	// the cookie/session engine's own, deliberately ephemeral, key). ---
+	kernel.GET("/crypto/encrypt", apphttp.Responder(func(c *apphttp.Context) any {
+		value, _ := c.Input("value", "a secret message").(string)
+		encrypter := c.App.Make("encrypter").(*encryption.Encrypter)
+		payload, err := encrypter.EncryptString(value)
+		if err != nil {
+			return c.Response(map[string]string{"error": "failed to encrypt"}, http.StatusInternalServerError)
+		}
+		return map[string]string{"payload": payload}
+	})).Name("crypto.encrypt")
+
+	kernel.GET("/crypto/decrypt", apphttp.Responder(func(c *apphttp.Context) any {
+		payload, _ := c.Input("payload", "").(string)
+		if payload == "" {
+			return c.Response(map[string]string{"error": "payload query param is required (see /crypto/encrypt)"}, http.StatusUnprocessableEntity)
+		}
+		encrypter := c.App.Make("encrypter").(*encryption.Encrypter)
+		value, err := encrypter.DecryptString(payload)
+		if err != nil {
+			return c.Response(map[string]string{"error": "invalid or tampered payload"}, http.StatusUnprocessableEntity)
+		}
+		return map[string]string{"value": value}
+	})).Name("crypto.decrypt")
+
+	// --- Hashing: hashing.Manager (bcrypt by default), resolved from the
+	// container under "hash" -- the same binding
+	// PostController/UserController already consume via their own local
+	// Hasher/hashService interfaces (Make(string) string), which the real
+	// hashing.Manager satisfies just as the old SHA-256 stand-in did. ---
+	kernel.POST("/hash/make", apphttp.Responder(func(c *apphttp.Context) any {
+		password, _ := c.Input("password", "").(string)
+		if password == "" {
+			return c.Response(map[string]string{"error": "password is required"}, http.StatusUnprocessableEntity)
+		}
+		hasher := c.App.Make("hash").(*hashing.Manager)
+		return map[string]string{"hash": hasher.Make(password)}
+	})).Name("hash.make")
+
+	kernel.POST("/hash/check", apphttp.Responder(func(c *apphttp.Context) any {
+		password, _ := c.Input("password", "").(string)
+		hash, _ := c.Input("hash", "").(string)
+		hasher := c.App.Make("hash").(*hashing.Manager)
+		return map[string]any{"matches": hasher.Check(password, hash)}
+	})).Name("hash.check")
+
+	// --- Validation + automatic error handling: Context.Validate panics
+	// with a *validation.Exception on failure, which RecoverMiddleware
+	// (registered first in public/main.go's global stack) turns into a
+	// 422 JSON response with field errors -- no manual "if v.Fails()"
+	// branch needed here, mirroring Laravel's $request->validate(). ---
+	kernel.POST("/register", apphttp.Responder(func(c *apphttp.Context) any {
+		validated := c.Validate(map[string]string{
+			"name":     "required|string|min:2",
+			"email":    "required|email",
+			"password": "required|min:6|confirmed",
+		})
+		return map[string]any{"status": "registered", "user": validated}
+	})).Name("register")
+
+	// --- Error handling: panicking with an *exceptions.HttpException
+	// (Abort/NotFound/...) or any other error/value is caught by
+	// RecoverMiddleware from anywhere downstream and rendered as JSON with
+	// the right status code -- see docs/error-handling.md. ---
+	kernel.GET("/errors/abort/{code}", func(c *apphttp.Context) {
+		code, err := strconv.Atoi(c.Param("code"))
+		if err != nil {
+			code = http.StatusTeapot
+		}
+		panic(exceptions.Abort(code, fmt.Sprintf("demo abort with status %d", code)))
+	}).WhereNumber("code").Name("errors.abort")
+
+	kernel.GET("/errors/not-found", func(c *apphttp.Context) {
+		panic(exceptions.NotFound(""))
+	}).Name("errors.not-found")
+
+	kernel.GET("/errors/boom", func(c *apphttp.Context) {
+		// A plain Go error, not an *exceptions.HttpException -- renders as
+		// a generic 500, with the underlying message included only when
+		// APP_DEBUG is on (see exceptions.Render).
+		panic(fmt.Errorf("golite: something went wrong deep in a handler"))
+	}).Name("errors.boom")
+
+	// --- Logging: logging.Manager, resolved from the container under
+	// "log", writing leveled entries to the configured channel
+	// (LOG_CHANNEL, default "single" -> storage/logs/golite.log). ---
+	kernel.GET("/logs/demo", apphttp.Responder(func(c *apphttp.Context) any {
+		logger := c.App.Make("log").(logging.Logger)
+		logger.Info("demo info entry", map[string]any{"ip": c.Ip()})
+		logger.Warning("demo warning entry")
+		logger.Error("demo error entry", map[string]any{"path": c.Path()})
+		return map[string]string{"status": "logged", "see": "storage/logs/golite.log"}
+	})).Name("logs.demo")
 
 	// --- Redirect shortcut: Route::redirect($from, $to, $status) ---
 	kernel.Redirect("/home", "/user", http.StatusFound)

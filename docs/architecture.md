@@ -13,16 +13,36 @@ Golite/
 ├── .env                          # Local environment variables (not committed)
 ├── go.mod / go.sum
 ├── config/
-│   └── app.go                    # AppConfig + Config, loaded from .env
+│   └── app.go                    # AppConfig/LogConfig/HashConfig + Config, loaded from .env
 ├── container/
 │   └── container.go              # Thread-safe IoC container (Bind / Make)
+├── encryption/
+│   └── encrypter.go              # AES-256-GCM Encrypter, persisted APP_KEY (Crypt facade equivalent)
+├── hashing/
+│   ├── hasher.go                     # Hasher interface
+│   ├── bcrypt.go                     # BcryptHasher (golang.org/x/crypto/bcrypt)
+│   └── manager.go                    # Driver-based Manager, bound as "hash"
+├── validation/
+│   ├── validator.go                  # Validator: Make/Fails/Passes/Errors/Validated
+│   ├── rules.go                      # Built-in rules + the Extend registry
+│   ├── errors.go                     # Errors (MessageBag-equivalent) + Exception
+│   └── util.go                       # dot-notation lookup, emptiness check
+├── logging/
+│   ├── logger.go                     # Level enum, Entry, Channel/Logger interfaces
+│   ├── single_channel.go             # "single" driver
+│   ├── daily_channel.go              # "daily" driver, with pruning
+│   ├── stack_channel.go              # "stack" driver (fan-out)
+│   └── manager.go                    # Driver-based Manager, bound as "log"
 ├── bootstrap/
 │   └── app.go                    # Application struct: wires container, config, providers, kernel
 ├── app/
 │   ├── Providers/
 │   │   ├── ServiceProvider.go        # ServiceProvider interface (Register/Boot)
-│   │   ├── AppServiceProvider.go     # Binds core app services (e.g. "hash")
+│   │   ├── AppServiceProvider.go     # Binds core app services ("hash", "encrypter", "log")
 │   │   └── RouteServiceProvider.go   # Maps routes onto the kernel during Boot
+│   ├── Exceptions/
+│   │   ├── exceptions.go             # HttpException, Abort/NotFound/Forbidden/Unauthorized/BadRequest
+│   │   └── Handler.go                # Render (panic -> JSON response), ShouldReport
 │   └── Http/
 │       ├── Kernel.go                 # Kernel, Middleware, RouteDefinition, RouteGroup — the router
 │       ├── Resource.go               # Route::resource/apiResource/singleton, Invokable, ControllerMiddleware
@@ -42,6 +62,7 @@ Golite/
 │       │   ├── Lock.go                   # Per-session-ID *sync.Mutex registry (TryLock-polled, timeout-bounded)
 │       │   └── crypto.go                 # AES-256-GCM + ID generation, duplicated from Cookie.go to avoid the cycle
 │       ├── Middleware/
+│       │   ├── RecoverMiddleware.go         # Global panic recovery, registered first; see app/Exceptions
 │       │   ├── LoggerMiddleware.go          # Global, "after"-style middleware
 │       │   ├── MethodSpoofingMiddleware.go  # Global, "before"-style: PUT/PATCH/DELETE spoofing for HTML forms
 │       │   ├── RoleMiddleware.go            # Parameterized, struct-based (e.g. "role:editor,admin")
@@ -88,6 +109,12 @@ Golite/
 | `routes/web.go`                           | `routes/web.php`                             |
 | `public/main.go`                          | `public/index.php`                           |
 | `config/app.go`                           | `config/app.php`                             |
+| `encryption.Encrypter`                    | `Illuminate\Encryption\Encrypter` / `Crypt`  |
+| `hashing.Manager`                         | `Illuminate\Hashing\HashManager` / `Hash`    |
+| `validation.Validator`                    | `Illuminate\Validation\Validator`            |
+| `app/Exceptions/` (`HttpException`, `Render`) | `App\Exceptions\Handler` + Laravel's exceptions |
+| `app/Http/Middleware/RecoverMiddleware.go`| the implicit exception-handling wrapper every Laravel request runs inside |
+| `logging.Manager`                         | `Illuminate\Log\LogManager` / `Log`          |
 
 ## Design decisions worth knowing
 
@@ -100,7 +127,8 @@ Golite/
 - **Controllers never import `app/Providers`.** `UserController` declares a
   small local interface (`hashService`) and type-asserts whatever the
   container returns for `"hash"`. Go's structural typing means the concrete
-  type (`providers.Hasher`) never needs to be imported by the controller,
+  type (`*hashing.Manager`, bound by `AppServiceProvider` — see
+  [hashing.md](hashing.md)) never needs to be imported by the controller,
   which avoids a `controllers → providers → routes → controllers` cycle.
 - **Package `http` under `app/Http`.** It shares its name with the standard
   library's `net/http` on purpose (mirroring Laravel's `Illuminate\Http`
@@ -242,6 +270,35 @@ Golite/
   no `*Context` to call `Context.Response` on — is what actually needs the
   package-level form. See
   [responses.md](responses.md#response-macros).
+- **Error handling is built on `panic`/`recover`, not a returned-error
+  convention.** Go has no `throw`/`catch`, but `Context.Next` is already
+  recursive (see [middleware.md](middleware.md#how-the-chain-runs--
+  contextnext)), which means a `panic` unwinds through exactly the call
+  chain `Next()` builds — so one `recover()`, in the outermost
+  middleware (`middleware.Recover`), catches a panic from anywhere
+  downstream with no changes needed to the router or `Context` itself.
+  This is also why `Context.Validate` *panics* with a
+  `*validation.Exception` on failure instead of returning one — it's what
+  lets it mirror Laravel's `$request->validate()` throwing automatically,
+  rather than forcing every handler to check an error return. See
+  [error-handling.md](error-handling.md).
+- **Not every recovered panic gets logged.** A failed validation or an
+  intentional `404` is an expected, client-driven outcome, not an
+  application error — `exceptions.ShouldReport` mirrors Laravel's
+  `Handler::$dontReport` so `RecoverMiddleware` only writes genuinely
+  reportable failures (5xx, or an unrecognized panic value) to the log.
+  See [error-handling.md](error-handling.md#what-gets-logged--
+  exceptionsshouldreport).
+- **`encryption.Encrypter` and the cookie/session engine's own
+  AES-256-GCM helpers are deliberately independent, not unified.**
+  `Kernel.appKey` (cookie/session encryption) is intentionally
+  regenerated every process restart (see the entry below); a general
+  `Crypt`-equivalent service needs the opposite property — a key
+  (`APP_KEY`) that persists in `.env` so encrypted application data
+  survives a restart. Sharing one key/lifecycle between the two would
+  have forced a compromise neither use case actually wants. See
+  [encryption.md](encryption.md#why-a-separate-encrypter-from-
+  cookiessessions).
 
 See [bootstrapping.md](bootstrapping.md) for how the pieces are wired
 together at startup, and [request-lifecycle.md](request-lifecycle.md) for

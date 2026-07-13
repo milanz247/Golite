@@ -31,7 +31,17 @@ Laravel's `App\Providers\AppServiceProvider`.
 type AppServiceProvider struct{}
 
 func (p *AppServiceProvider) Register(c *container.Container) {
-	c.Bind("hash", NewHasher())
+	cfg := c.Make("config").(*config.Config)
+
+	hasher := hashing.NewManager(cfg.Hash.Driver)
+	hasher.Extend("bcrypt", hashing.NewBcryptHasher(cfg.Hash.BcryptCost))
+	c.Bind("hash", hasher)
+
+	c.Bind("encrypter", encryption.NewEncrypter(cfg.App.Key))
+
+	logger := logging.NewManager(cfg.Log.Channel)
+	logger.Extend("single", logging.NewSingleChannel(cfg.Log.Path))
+	c.Bind("log", logger)
 }
 
 func (p *AppServiceProvider) Boot(c *container.Container) {
@@ -39,9 +49,13 @@ func (p *AppServiceProvider) Boot(c *container.Container) {
 }
 ```
 
-It also defines `Hasher`, a minimal SHA-256-based stand-in for Laravel's
-`Hash` facade, purely to demonstrate a controller resolving a bound service
-by name.
+It binds Golite's core, real (not stand-in) services: `"hash"`
+(`*hashing.Manager`, bcrypt-backed — see [hashing.md](hashing.md)),
+`"encrypter"` (`*encryption.Encrypter` — see
+[encryption.md](encryption.md)), and `"log"` (`*logging.Manager` — see
+[logging.md](logging.md)), each configured from `*config.Config`, which
+was already bound as `"config"` by `bootstrap.NewApplication` before any
+provider runs (see [bootstrapping.md](bootstrapping.md)).
 
 ## `RouteServiceProvider`
 

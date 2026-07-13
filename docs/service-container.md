@@ -49,11 +49,13 @@ visible everywhere else that holds a reference to the same container.
 
 ## What gets bound, by whom
 
-| Key        | Bound in                                         | Type               |
-|------------|---------------------------------------------------|--------------------|
-| `"config"` | `bootstrap.NewApplication`                        | `*config.Config`   |
-| `"kernel"` | `bootstrap.NewApplication`                        | `*apphttp.Kernel`  |
-| `"hash"`   | `providers.AppServiceProvider.Register`           | `*providers.Hasher`|
+| Key          | Bound in                                 | Type                    |
+|--------------|-------------------------------------------|-------------------------|
+| `"config"`   | `bootstrap.NewApplication`                | `*config.Config`        |
+| `"kernel"`   | `bootstrap.NewApplication`                | `*apphttp.Kernel`       |
+| `"hash"`     | `providers.AppServiceProvider.Register`   | `*hashing.Manager`      |
+| `"encrypter"`| `providers.AppServiceProvider.Register`   | `*encryption.Encrypter` |
+| `"log"`      | `providers.AppServiceProvider.Register`   | `*logging.Manager`      |
 
 ## Resolving a service without an import cycle
 
@@ -74,10 +76,11 @@ func (u *UserController) Show(c *apphttp.Context) {
 }
 ```
 
-Since `*providers.Hasher` has a `Make(string) string` method, it
-automatically satisfies `hashService` — Go's structural typing means no
-import of the concrete type is needed. Use this pattern whenever a consumer
-needs a service but binding its package would create a cycle.
+Since `*hashing.Manager` (see [hashing.md](hashing.md)) has a
+`Make(string) string` method, it automatically satisfies `hashService` —
+Go's structural typing means no import of the concrete type is needed. Use
+this pattern whenever a consumer needs a service but binding its package
+would create a cycle.
 
 ## Adding your own binding
 

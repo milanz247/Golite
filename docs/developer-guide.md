@@ -131,8 +131,9 @@ than mutating it. See
 ### Add a new service (bind + resolve)
 
 1. Implement the service anywhere reasonable (a new package, or inline in a
-   provider file for something small — see `Hasher` in
-   `app/Providers/AppServiceProvider.go` for an example).
+   provider file for something small — see the `hashing`, `encryption`, and
+   `logging` packages, all bound from `app/Providers/AppServiceProvider.go`,
+   for real examples of the "own package" approach).
 2. Bind it in a provider's `Register` method:
 
    ```go
