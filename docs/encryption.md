@@ -98,7 +98,10 @@ openssl rand -base64 32
 
 ## Demo routes
 
-`GET /crypto/encrypt?value=...` and `GET /crypto/decrypt?payload=...` in
-[`routes/web.go`](../routes/web.go) round-trip a value through the
-container-resolved `Encrypter`, and demonstrate a tampered/garbage payload
-being rejected with a 422 rather than a decrypted-garbage response.
+`GET /crypto/encrypt?value=...` and `GET /crypto/decrypt?payload=...`,
+handled by
+[`CryptoController`](../app/Http/Controllers/CryptoController.go) (`Encrypt`/
+`Decrypt`, constructor-injected with the container's `*encryption.Encrypter`
+— wired up in [`routes/web.go`](../routes/web.go)), round-trip a value
+through the encrypter and demonstrate a tampered/garbage payload being
+rejected with a 422 rather than a decrypted-garbage response.

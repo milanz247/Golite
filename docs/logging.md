@@ -116,6 +116,8 @@ Output (`"single"`, the default):
 
 ## Demo route
 
-`GET /logs/demo` in [`routes/web.go`](../routes/web.go) writes an info, a
-warning, and an error entry, then points at
-`storage/logs/golite.log` in its response.
+`GET /logs/demo`, handled by
+[`LogController.Demo`](../app/Http/Controllers/LogController.go)
+(constructor-injected with the container's `logging.Logger` — wired up in
+[`routes/web.go`](../routes/web.go)), writes an info, a warning, and an
+error entry, then points at `storage/logs/golite.log` in its response.

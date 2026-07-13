@@ -98,14 +98,15 @@ with field errors — no handler needs its own `if v.Fails() { ... }`
 branch:
 
 ```go
-kernel.POST("/register", apphttp.Responder(func(c *apphttp.Context) any {
+// app/Http/Controllers/ValidationController.go
+func (vc *ValidationController) Register(c *apphttp.Context) {
 	validated := c.Validate(map[string]string{
 		"name":     "required|string|min:2",
 		"email":    "required|email",
 		"password": "required|min:6|confirmed",
 	})
-	return map[string]any{"status": "registered", "user": validated}
-}))
+	c.JSON(http.StatusOK, map[string]any{"status": "registered", "user": validated})
+}
 ```
 
 A failing request to this route gets, with no code in the handler for it:
@@ -130,4 +131,6 @@ alongside `/register` for the automatic one.
 
 ## Demo route
 
-`POST /register` in [`routes/web.go`](../routes/web.go), described above.
+`POST /register`, handled by
+[`ValidationController.Register`](../app/Http/Controllers/ValidationController.go)
+(wired up in [`routes/web.go`](../routes/web.go)), described above.

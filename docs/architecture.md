@@ -79,7 +79,12 @@ Golite/
 │           ├── PostController.go               # Full resource + DI + controller middleware
 │           ├── CommentController.go             # Nested + shallow resource demo
 │           ├── ProfileController.go             # Singleton resource demo
-│           └── ProvisionServerController.go     # Invokable (single-action) controller demo
+│           ├── ProvisionServerController.go     # Invokable (single-action) controller demo
+│           ├── CryptoController.go              # Encrypt/Decrypt (encryption.md)
+│           ├── HashController.go                # Make/Check (hashing.md)
+│           ├── ValidationController.go          # Register (validation.md)
+│           ├── ErrorDemoController.go           # Abort/NotFound/Boom (error-handling.md)
+│           └── LogController.go                 # Demo (logging.md)
 ├── routes/
 │   └── web.go                    # MapWebRoutes: registers paths onto the kernel
 ├── resources/

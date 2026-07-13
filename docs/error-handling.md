@@ -124,7 +124,10 @@ typed exceptions to begin with.
 ## Demo routes
 
 `GET /errors/abort/{code}`, `GET /errors/not-found`, and `GET
-/errors/boom` in [`routes/web.go`](../routes/web.go) demonstrate an
+/errors/boom`, handled by
+[`ErrorDemoController`](../app/Http/Controllers/ErrorDemoController.go)
+(`Abort`/`NotFound`/`Boom`, wired up in
+[`routes/web.go`](../routes/web.go)) demonstrate an
 arbitrary-status `HttpException`, the `NotFound` helper, and a plain
 `error` panic falling through to the generic `500` branch, respectively —
 along with `POST /register`'s validation failure (see

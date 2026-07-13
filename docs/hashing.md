@@ -86,6 +86,8 @@ if hasher.Check(candidate, hashed) {
 
 ## Demo routes
 
-`POST /hash/make` and `POST /hash/check` in
-[`routes/web.go`](../routes/web.go) hash a password and verify a candidate
-against it, resolving `Manager` from the container exactly as above.
+`POST /hash/make` and `POST /hash/check`, handled by
+[`HashController`](../app/Http/Controllers/HashController.go) (`Make`/
+`Check`, constructor-injected with the same `Hasher` interface
+`PostController` uses — wired up in [`routes/web.go`](../routes/web.go)),
+hash a password and verify a candidate against it.

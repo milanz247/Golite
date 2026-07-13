@@ -6,13 +6,17 @@ import (
 	apphttp "Golite/app/Http"
 )
 
-// Hasher is the dependency PostController takes via constructor injection
-// — resolved from the service container
-// (kernel.Container().Make("hash").(controllers.Hasher)) in routes/web.go
-// — demonstrating a Route::resource controller wired up with a real
-// dependency rather than constructed bare.
+// Hasher is the dependency any controller in this package takes via
+// constructor injection for the container's "hash" service — resolved as
+// kernel.Container().Make("hash").(controllers.Hasher) in routes/web.go.
+// *hashing.Manager (see docs/hashing.md) satisfies it structurally, so
+// this package never needs to import "Golite/hashing" itself. PostController
+// only calls Make; HashController (HashController.go) uses the full
+// interface to demonstrate Hash::check/needsRehash as well.
 type Hasher interface {
 	Make(value string) string
+	Check(value, hashedValue string) bool
+	NeedsRehash(hashedValue string) bool
 }
 
 // PostController is a full resource controller. It deliberately does not
