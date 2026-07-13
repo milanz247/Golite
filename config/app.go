@@ -44,12 +44,13 @@ type HashConfig struct {
 	BcryptCost int
 }
 
-// Config is the root configuration repository. Additional sections (e.g. a
-// DatabaseConfig) can be added here as the framework grows.
+// Config is the root configuration repository. Additional sections can be
+// added here as the framework grows.
 type Config struct {
 	App  AppConfig
 	Log  LogConfig
 	Hash HashConfig
+	DB   DatabaseConfig
 }
 
 // LoadConfig reads variables from a .env file (à la Laravel) and falls back
@@ -78,6 +79,7 @@ func LoadConfig() *Config {
 			Driver:     getEnv("HASH_DRIVER", "bcrypt"),
 			BcryptCost: getEnvInt("HASH_BCRYPT_COST", 10),
 		},
+		DB: loadDatabaseConfig(),
 	}
 }
 

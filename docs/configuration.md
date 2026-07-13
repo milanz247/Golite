@@ -47,10 +47,17 @@ type HashConfig struct {
 	BcryptCost int
 }
 
+type DatabaseConfig struct {
+	Host, Port, Database, Username, Password, Charset string
+	MaxIdleConns, MaxOpenConns                         int
+	ConnMaxLifetime                                    time.Duration
+}
+
 type Config struct {
 	App  AppConfig
 	Log  LogConfig
 	Hash HashConfig
+	DB   DatabaseConfig
 }
 
 func LoadConfig() *Config {
@@ -77,9 +84,17 @@ func LoadConfig() *Config {
 			Driver:     getEnv("HASH_DRIVER", "bcrypt"),
 			BcryptCost: getEnvInt("HASH_BCRYPT_COST", 10),
 		},
+		DB: loadDatabaseConfig(), // DB_* — see database.md
 	}
 }
 ```
+
+`DatabaseConfig` lives in its own file, `config/database.go` (`loadDatabaseConfig`,
+reading `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD`/`DB_CHARSET`
+plus the connection-pool tuning `DB_MAX_IDLE_CONNS`/`DB_MAX_OPEN_CONNS`/
+`DB_CONN_MAX_LIFETIME_MINUTES`) rather than inline in `app.go` alongside
+the others — see [database.md](database.md) for the full picture
+(`DatabaseServiceProvider`, models, migrations, the `artisan` CLI).
 
 - `godotenv.Load()` populates the process environment from `.env` if the
   file exists. If it doesn't (e.g. in production, where real environment

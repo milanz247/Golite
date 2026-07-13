@@ -17,5 +17,6 @@
 - [Validation](validation.md) — rule strings, built-in rules, custom rules via `Extend`, `Context.Validate` and automatic 422 responses
 - [Error Handling](error-handling.md) — `panic`/`recover` as Golite's exception mechanism, `HttpException`/`abort()`, `RecoverMiddleware`, what gets logged vs. rendered
 - [Logging](logging.md) — PSR-3 levels, `single`/`daily`/`stack` channels, the driver-based `logging.Manager`, the `"log"` container binding
+- [Database, ORM & Migrations](database.md) — GORM/MySQL via `DatabaseServiceProvider`, `app/Models`, the `Migration` interface + self-registration, `Runner` (batch-tracked migrate/rollback), and the `artisan` CLI
 - [Configuration](configuration.md) — `.env`, `config.LoadConfig()`, adding new config values
 - [Developer Guide](developer-guide.md) — practical how-tos: running the app, adding routes/services/providers/middleware, known limitations

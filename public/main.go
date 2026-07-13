@@ -18,6 +18,7 @@ func main() {
 	app := bootstrap.NewApplication()
 
 	app.Register(&providers.AppServiceProvider{})
+	app.Register(&providers.DatabaseServiceProvider{})
 	app.Register(&providers.RouteServiceProvider{})
 
 	// Order matters: Recover must be outermost — its deferred recover()

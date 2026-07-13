@@ -12,6 +12,14 @@ import (
 	"sync"
 )
 
+// H is a map[string]any shorthand for handing data to Context.JSON or
+// Context.View, so a handler can write c.View("index", H{"Name": "World"})
+// instead of the more verbose map[string]any{...} — the same convention
+// several minimal Go web frameworks use (gin.H and similar). It's just a
+// named map[string]any: any map[string]any literal is assignable to H and
+// vice versa, so nothing that already builds a plain map needs to change.
+type H map[string]any
+
 // ---------------------------------------------------------------------------
 // Dynamic return-type serialization (requirement 1): handlers can
 // optionally return a value instead of writing the response themselves.
@@ -117,7 +125,7 @@ type Response struct {
 	flashInput bool
 
 	viewName string
-	viewData map[string]any
+	viewData any
 
 	filePath     string
 	downloadName string
@@ -203,8 +211,12 @@ func (r *Response) Json(data any) *Response {
 // View renders an html/template file from ViewsDirectory (default
 // "resources/views"), named without its extension — View("welcome", ...)
 // loads "resources/views/welcome.html" — mirroring Laravel's view()
-// helper. Templates are parsed once and cached; see parseView.
-func (r *Response) View(templateName string, data map[string]any) *Response {
+// helper. Templates are parsed once and cached; see parseView. data is
+// passed straight to html/template's Execute, so it can be an H (a
+// map[string]any, for {{.Key}} access), a struct (for {{.Field}}), or nil
+// — see Context.View for the common shorthand most handlers reach for
+// instead of this method directly.
+func (r *Response) View(templateName string, data any) *Response {
 	r.kind = kindView
 	r.viewName = templateName
 	r.viewData = data

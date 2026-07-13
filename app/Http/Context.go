@@ -154,6 +154,27 @@ func (c *Context) Response(content any, status ...int) *Response {
 	return NewResponse(content, status...)
 }
 
+// View renders resources/views/<name>.html and sends it immediately — a
+// shorthand for c.Response(nil).View(name, data).Send(c) for the common
+// case where a handler wants nothing else from the fluent Response API.
+// data is optional and variadic:
+//
+//	c.View("index", H{"Message": "hi"})   // an H (map[string]any) literal
+//	c.View("index", someStruct)            // any struct, for {{.Field}} access
+//	c.View("index")                        // no data: whatever was
+//	    previously stored via Context.Set is used instead — lets a handler
+//	    (or an earlier middleware) build up view data incrementally rather
+//	    than assembling one map/struct inline.
+func (c *Context) View(name string, data ...any) {
+	var viewData any
+	if len(data) > 0 {
+		viewData = data[0]
+	} else {
+		viewData = c.store
+	}
+	c.Response(nil).View(name, viewData).Send(c)
+}
+
 // Redirect builds a redirect response to a (typically local, but not
 // required to be) URL, defaulting to 302 Found — Laravel's redirect()->to().
 func (c *Context) Redirect(to string, status ...int) *Response {

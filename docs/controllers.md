@@ -6,6 +6,7 @@ Files: [`app/Http/Controllers/Controller.go`](../app/Http/Controllers/Controller
 [`container/container.go`](../container/container.go) (`Container.ResolveType`),
 [`app/Http/Controllers/PostController.go`](../app/Http/Controllers/PostController.go),
 [`app/Http/Controllers/UserController.go`](../app/Http/Controllers/UserController.go),
+[`app/Http/Controllers/Home.go`](../app/Http/Controllers/Home.go) (plain-function style),
 [`app/Http/Controllers/CommentController.go`](../app/Http/Controllers/CommentController.go),
 [`app/Http/Controllers/ProfileController.go`](../app/Http/Controllers/ProfileController.go),
 [`app/Http/Controllers/ProvisionServerController.go`](../app/Http/Controllers/ProvisionServerController.go)
@@ -155,6 +156,47 @@ its constructor, instead.
   constructor, like `PostController`), or when a controller needs to
   guarantee *which* implementation of an ambiguous interface it gets
   rather than leaving it to `ResolveType`'s "first match" scan.
+
+## Plain-function controllers
+
+Not every handler needs a struct at all. A controller with no
+dependencies and no per-action middleware — [`controllers.Index`](../app/Http/Controllers/Home.go),
+the welcome-page handler — is just an ordinary package-level function:
+
+```go
+package controllers
+
+import apphttp "Golite/app/Http"
+
+func Index(c *apphttp.Context) {
+	c.View("welcome", apphttp.H{
+		"Message": "A lightweight, high-performance Go web framework built on the standard library.",
+	})
+}
+```
+
+It registers exactly like any other `HandlerFunc` — no wrapping, no
+`New...` constructor to call first:
+
+```go
+kernel.GET("/welcome", controllers.Index).Name("welcome")
+```
+
+`Context.View` (see [responses.md](responses.md#contextview--the-shorthand-most-handlers-reach-for))
+and `apphttp.H` (a `map[string]any` shorthand) are what keep this
+version this short — no `c.Response(nil).View(...).Send(c)` ceremony, no
+`map[string]any{...}` boilerplate.
+
+Reach for this style for a handler that's genuinely just "render a view
+(or return some JSON) from static or request-derived data" — `Index`,
+`resourceHandler` in `routes/web.go`, or a one-off admin/health-check
+route are typical cases. Once a handler needs constructor- or
+method-injected dependencies, or its own `Controller.Middleware(...)`
+rules, move it into a struct — every other controller in this package
+(`PostController`, `UserController`, `CryptoController`, ...) is that
+same shape for exactly that reason. Nothing about routing, middleware, or
+`Route::resource` cares which shape a given handler is; the two styles
+mix freely in the same route table.
 
 ## Single-action (invokable) controllers
 

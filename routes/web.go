@@ -378,10 +378,11 @@ func MapWebRoutes(kernel *apphttp.Kernel) {
 		return c.Response(nil).Json([]string{"go", "is", "fun"})
 	})).Name("response.json")
 
-	// .View renders an html/template file from resources/views/.
-	kernel.GET("/welcome", apphttp.Responder(func(c *apphttp.Context) any {
-		return c.Response(nil).View("welcome", map[string]any{"Name": "World"})
-	})).Name("welcome")
+	// .View renders an html/template file from resources/views/ — see
+	// controllers.Index for the plain-function controller style (no
+	// struct, no Controller embed) that Context.View makes practical for
+	// a handler this simple.
+	kernel.GET("/welcome", controllers.Index).Name("welcome")
 
 	// .Download forces a save-as download; .File serves the same kind of
 	// file inline (e.g. an image or PDF opening directly in the browser);

@@ -164,7 +164,7 @@ Forces JSON encoding regardless of `data`'s type — including a `string`,
 which the default auto-conversion would otherwise send as `text/html`.
 
 ```go
-func (r *Response) View(templateName string, data map[string]any) *Response
+func (r *Response) View(templateName string, data any) *Response
 ```
 
 Renders `ViewsDirectory/templateName.html` (default
@@ -176,6 +176,9 @@ disk on every request. There's no cache invalidation, matching the
 cookie encryption key (see
 [architecture.md](architecture.md#design-decisions-worth-knowing)).
 
+`data` goes straight to `html/template`'s `Execute`, so it can be a map
+(`{{.Key}}`) or a struct (`{{.Field}}`):
+
 ```go
 c.Response(nil).View("welcome", map[string]any{"Name": "World"})
 ```
@@ -185,6 +188,37 @@ loads `resources/views/welcome.html`:
 ```html
 <h1>Hello, {{.Name}}!</h1>
 ```
+
+### `Context.View` — the shorthand most handlers reach for
+
+```go
+func (c *Context) View(name string, data ...any)
+```
+
+`c.Response(nil).View(name, data).Send(c)`, spelled out above, is more
+ceremony than most handlers need — `Context.View` is a direct shortcut
+that renders and sends in one call:
+
+```go
+c.View("welcome", apphttp.H{"Name": "World"})
+```
+
+`apphttp.H` is just `map[string]any` under another name (`type H
+map[string]any`) — a shorthand so a handler can write `H{...}` instead of
+`map[string]any{...}`, the same convention several minimal Go frameworks
+use. A struct works too (`c.View("welcome", someStruct)`), and so does
+calling `c.View("welcome")` with no data argument at all — that falls
+back to whatever was previously stored via `Context.Set`, which lets a
+handler (or an earlier middleware) build up view data incrementally
+instead of assembling one literal inline.
+
+See [`controllers.Index`](../app/Http/Controllers/Home.go) for a complete
+plain-function controller built around this — no struct, no `Controller`
+embed, just `func Index(c *apphttp.Context) { c.View(...) }` registered
+directly as `kernel.GET("/welcome", controllers.Index)`. See
+[controllers.md](controllers.md#plain-function-controllers) for when this
+style is a better fit than the struct-based one every other controller in
+the codebase uses.
 
 ```go
 func (r *Response) Download(filePath string, filename ...string) *Response

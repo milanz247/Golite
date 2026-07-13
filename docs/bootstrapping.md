@@ -50,6 +50,7 @@ File: [`public/main.go`](../public/main.go)
 app := bootstrap.NewApplication()
 
 app.Register(&providers.AppServiceProvider{})
+app.Register(&providers.DatabaseServiceProvider{})
 app.Register(&providers.RouteServiceProvider{})
 ```
 

@@ -2,6 +2,7 @@
 
 Files: [`app/Providers/ServiceProvider.go`](../app/Providers/ServiceProvider.go),
 [`app/Providers/AppServiceProvider.go`](../app/Providers/AppServiceProvider.go),
+[`app/Providers/DatabaseServiceProvider.go`](../app/Providers/DatabaseServiceProvider.go),
 [`app/Providers/RouteServiceProvider.go`](../app/Providers/RouteServiceProvider.go)
 
 Service providers are the central place where the application is assembled
@@ -57,6 +58,35 @@ It binds Golite's core, real (not stand-in) services: `"hash"`
 was already bound as `"config"` by `bootstrap.NewApplication` before any
 provider runs (see [bootstrapping.md](bootstrapping.md)).
 
+## `DatabaseServiceProvider`
+
+Opens Golite's GORM/MySQL connection — see [database.md](database.md) for
+the full picture (models, migrations, the `artisan` CLI).
+
+```go
+type DatabaseServiceProvider struct{}
+
+func (p *DatabaseServiceProvider) Register(c *container.Container) {
+	cfg := c.Make("config").(*config.Config)
+
+	db, err := OpenDatabase(cfg.DB)
+	if err != nil {
+		log.Printf("[DatabaseServiceProvider] %v — \"db\" unavailable", err)
+		return
+	}
+	c.Bind("db", db)
+}
+
+func (p *DatabaseServiceProvider) Boot(c *container.Container) {}
+```
+
+Unlike every other core provider, a failure here doesn't panic — it logs
+a warning and simply leaves `"db"` unbound, so `go run ./public/main.go`
+still starts even without a MySQL server running (see
+[database.md](database.md#databaseserviceprovider-and-the-db-binding) and
+[architecture.md](architecture.md#design-decisions-worth-knowing) for
+why).
+
 ## `RouteServiceProvider`
 
 Loads the routing engine — Golite's counterpart to Laravel's
@@ -87,6 +117,7 @@ Providers are wired up in [`public/main.go`](../public/main.go):
 app := bootstrap.NewApplication()
 
 app.Register(&providers.AppServiceProvider{})
+app.Register(&providers.DatabaseServiceProvider{})
 app.Register(&providers.RouteServiceProvider{})
 
 app.Kernel.UseMiddleware(appMiddleware.Logger())

@@ -12,8 +12,10 @@ reflection/facades).
 Golite/
 ├── .env                          # Local environment variables (not committed)
 ├── go.mod / go.sum
+├── artisan.go                    # Console driver: migrate/migrate:rollback/make:migration
 ├── config/
-│   └── app.go                    # AppConfig/LogConfig/HashConfig + Config, loaded from .env
+│   ├── app.go                    # AppConfig/LogConfig/HashConfig + Config, loaded from .env
+│   └── database.go               # DatabaseConfig: MySQL credentials + connection-pool tuning
 ├── container/
 │   └── container.go              # Thread-safe IoC container (Bind / Make)
 ├── encryption/
@@ -33,13 +35,24 @@ Golite/
 │   ├── daily_channel.go              # "daily" driver, with pruning
 │   ├── stack_channel.go              # "stack" driver (fan-out)
 │   └── manager.go                    # Driver-based Manager, bound as "log"
+├── database/
+│   └── migrations/
+│       ├── migration.go              # Migration interface, Register/All (self-registration via init())
+│       ├── runner.go                 # Runner: batch-tracked Migrate/Rollback against the "migrations" table
+│       ├── 2026_07_13_000001_create_users_table.go
+│       └── 2026_07_13_000002_create_posts_table.go
 ├── bootstrap/
 │   └── app.go                    # Application struct: wires container, config, providers, kernel
 ├── app/
 │   ├── Providers/
 │   │   ├── ServiceProvider.go        # ServiceProvider interface (Register/Boot)
 │   │   ├── AppServiceProvider.go     # Binds core app services ("hash", "encrypter", "log")
+│   │   ├── DatabaseServiceProvider.go # OpenDatabase + GORM/MySQL, binds "db"
 │   │   └── RouteServiceProvider.go   # Maps routes onto the kernel during Boot
+│   ├── Models/
+│   │   ├── Model.go                  # Base Model: ID/CreatedAt/UpdatedAt/DeletedAt
+│   │   ├── User.go                   # Example model + HasMany Posts
+│   │   └── Post.go                   # Example related model + BelongsTo User
 │   ├── Exceptions/
 │   │   ├── exceptions.go             # HttpException, Abort/NotFound/Forbidden/Unauthorized/BadRequest
 │   │   └── Handler.go                # Render (panic -> JSON response), ShouldReport
@@ -47,8 +60,8 @@ Golite/
 │       ├── Kernel.go                 # Kernel, Middleware, RouteDefinition, RouteGroup — the router
 │       ├── Resource.go               # Route::resource/apiResource/singleton, Invokable, ControllerMiddleware
 │       ├── Injection.go              # Inject: Laravel-style method injection via Container.ResolveType
-│       ├── Response.go               # Response factory, Responder/auto-conversion, macros, view rendering
-│       ├── Context.go                # Context struct + methods (JSON, Redirect, Session, CsrfToken, files, ...)
+│       ├── Response.go               # Response factory, Responder/auto-conversion, macros, view rendering, H
+│       ├── Context.go                # Context struct + methods (JSON, View, Redirect, Session, CsrfToken, files, ...)
 │       ├── Input.go                  # Unified input payload: All/Input/Query/Has/Only/Except/Boolean/Merge
 │       ├── Cookie.go                 # AES-256-GCM cookie encryption primitives
 │       ├── UploadedFile.go           # UploadedFile: IsValid/Path/Extension/Store/StoreAs
@@ -85,7 +98,8 @@ Golite/
 │           ├── HashController.go                # Make/Check, method-injected Hasher (hashing.md)
 │           ├── ValidationController.go          # Register (validation.md)
 │           ├── ErrorDemoController.go           # Abort/NotFound/Boom (error-handling.md)
-│           └── LogController.go                 # Demo, method-injected logging.Logger (logging.md)
+│           ├── LogController.go                 # Demo, method-injected logging.Logger (logging.md)
+│           └── Home.go                           # Index: plain-function controller (controllers.md#plain-function-controllers)
 ├── routes/
 │   └── web.go                    # MapWebRoutes: registers paths onto the kernel
 ├── resources/
@@ -122,6 +136,10 @@ Golite/
 | `app/Http/Middleware/RecoverMiddleware.go`| the implicit exception-handling wrapper every Laravel request runs inside |
 | `apphttp.Inject` + `Container.ResolveType`| automatic controller method injection (`public function show(Hasher $hash)`) |
 | `logging.Manager`                         | `Illuminate\Log\LogManager` / `Log`          |
+| `app/Providers/DatabaseServiceProvider.go`| `Illuminate\Database\DatabaseServiceProvider`|
+| `app/Models/` (GORM)                      | `app/Models/` (Eloquent)                     |
+| `database/migrations/` (`Migration`, `Runner`) | `database/migrations/` + `Illuminate\Database\Migrations\Migrator` |
+| `artisan.go`                              | `artisan` / `php artisan`                    |
 
 ## Design decisions worth knowing
 
@@ -318,6 +336,35 @@ Golite/
   have forced a compromise neither use case actually wants. See
   [encryption.md](encryption.md#why-a-separate-encrypter-from-
   cookiessessions).
+- **`DatabaseServiceProvider.Register` never panics on a failed MySQL
+  connection — it logs a warning and leaves `"db"` unbound.** Every other
+  core provider in this list binds a service that works with zero
+  external setup (bcrypt, AES-256-GCM, a file logger); MySQL is the first
+  dependency Golite has that isn't guaranteed to exist on a fresh clone,
+  and the HTTP demo has never required one. Failing loudly would mean
+  `go run ./public/main.go` no longer starts without a running database
+  server even for routes that never touch one. `artisan.go`'s
+  `migrate`/`migrate:rollback`, which are meaningless without a database,
+  make the opposite call deliberately — see
+  [database.md](database.md#databaseserviceprovider-and-the-db-binding).
+- **Migrations register themselves via `init()`, not a manifest file or
+  filesystem scan.** Every file in `database/migrations/` compiles into
+  the same `migrations` package, so importing
+  `"Golite/database/migrations"` (as `artisan.go` does) is already enough
+  to run every migration file's `init()` — Go's own compiler does the
+  "discover every migration" work Laravel's migrator does at runtime by
+  reading the directory. The tradeoff: a migration only exists once its
+  file is part of the build, so `make:migration` generating source code
+  (not a data file) is a hard requirement of this design, not a style
+  choice. See [database.md](database.md#migrations--databasemigrations).
+- **`Runner.Rollback` reads the whole `migrations` table and computes the
+  latest batch/reverse order in Go, not with a single SQL query.** The
+  table is expected to stay small (one row per migration ever run, not
+  per row of application data), so a `SELECT *` plus in-memory grouping
+  is simpler and just as correct as a `MAX(batch)` subquery — and it's
+  what lets `Rollback` build the `byName` lookup it needs anyway to call
+  each migration's `Down`. See
+  [database.md](database.md#runner--applying-and-rolling-back).
 
 See [bootstrapping.md](bootstrapping.md) for how the pieces are wired
 together at startup, and [request-lifecycle.md](request-lifecycle.md) for

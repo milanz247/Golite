@@ -87,10 +87,20 @@ structs and interfaces instead of reflection-based magic.
 - A driver-based `logging.Manager` with PSR-3 levels and
   `"single"`/`"daily"`/`"stack"` channels, bound as `"log"`, writing to
   `storage/logs/`
+- A Laravel-style database layer: GORM/MySQL via `DatabaseServiceProvider`
+  (bound as `"db"`, connection-pool tuned from `.env`), Eloquent-style
+  `app/Models` (a base `Model` plus a `User`/`Post` HasMany/BelongsTo
+  example), a self-registering `Migration` interface
+  (`Up(db *gorm.DB) error` / `Down(db *gorm.DB) error`), and a
+  batch-tracked `Runner` (`migrate/migrate:rollback` against a
+  `migrations` table) — all driven by the `artisan` CLI
+  (`go run artisan.go migrate|migrate:rollback|make:migration <name>`)
 
 ## Requirements
 
 - Go 1.20+
+- MySQL (only if you use the database layer — everything else runs with
+  zero external dependencies; see [docs/database.md](docs/database.md))
 
 ## Getting started
 
@@ -119,9 +129,23 @@ DB_PORT=3306
 
 `.env` is git-ignored — create your own in the project root before running
 the app. See [.env.example](.env.example) for the full set of variables
-(including `APP_KEY`, `LOG_CHANNEL`, and `HASH_DRIVER` — all optional, with
-sane defaults) and [docs/configuration.md](docs/configuration.md) for
-details.
+(including `APP_KEY`, `LOG_CHANNEL`, `HASH_DRIVER`, and the `DB_*`
+database credentials — all optional, with sane defaults) and
+[docs/configuration.md](docs/configuration.md) for details.
+
+### Database & migrations
+
+Once `DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD` point at a real MySQL
+database (Golite creates tables, never the database itself):
+
+```bash
+go run artisan.go migrate              # run all pending migrations
+go run artisan.go migrate:rollback     # roll back the most recent batch
+go run artisan.go make:migration <name> # scaffold a new migration file
+```
+
+See [docs/database.md](docs/database.md) for the full picture — models,
+the `Migration` interface, and how `Runner` tracks batches.
 
 ## Project structure
 
@@ -129,15 +153,19 @@ details.
 Golite/
 ├── .env
 ├── go.mod / go.sum
+├── artisan.go        # Console driver: migrate / migrate:rollback / make:migration
 ├── config/           # Configuration loaded from .env
 ├── container/        # Thread-safe IoC container
 ├── encryption/       # AES-256-GCM Encrypter (Crypt facade equivalent, persisted APP_KEY)
 ├── hashing/          # Driver-based Hasher/Manager (bcrypt default)
 ├── validation/       # Rule-string Validator, built-in + custom rules
 ├── logging/          # Driver-based logging Manager (single/daily/stack channels)
+├── database/
+│   └── migrations/   # Migration interface + self-registering migration files, Runner
 ├── bootstrap/        # Application struct: wires everything together
 ├── app/
-│   ├── Providers/     # Service providers (Register/Boot)
+│   ├── Providers/     # Service providers (Register/Boot), incl. DatabaseServiceProvider
+│   ├── Models/        # GORM models: base Model, User, Post
 │   ├── Exceptions/    # HttpException, abort()-style helpers, panic -> JSON rendering
 │   └── Http/
 │       ├── Kernel.go          # Regex router, groups, named routes, middleware registries + pipeline (http.Handler)
@@ -163,8 +191,8 @@ Full framework documentation — architecture, the bootstrapping process, the
 request lifecycle, the service container, providers, routing, middleware,
 CSRF protection, HTTP request handling, controllers & resource routing,
 response handling, encryption, hashing, validation, error handling,
-logging, configuration, and a developer guide — lives in
-[`docs/`](docs/README.md).
+logging, the database/ORM/migration layer, configuration, and a developer
+guide — lives in [`docs/`](docs/README.md).
 
 ## Building and testing
 

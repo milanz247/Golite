@@ -69,6 +69,7 @@ visible everywhere else that holds a reference to the same container.
 | `"hash"`     | `providers.AppServiceProvider.Register`   | `*hashing.Manager`      |
 | `"encrypter"`| `providers.AppServiceProvider.Register`   | `*encryption.Encrypter` |
 | `"log"`      | `providers.AppServiceProvider.Register`   | `*logging.Manager`      |
+| `"db"`       | `providers.DatabaseServiceProvider.Register` | `*gorm.DB` (unbound if MySQL wasn't reachable at boot — see [database.md](database.md)) |
 
 ## Resolving a service without an import cycle
 
